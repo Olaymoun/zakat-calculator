@@ -132,8 +132,8 @@ Click **Refresh FMP Prices** in the header to re-fetch current prices and recalc
 
 ```
 zakat-calculator/
-├── main.py          # FastAPI server, all REST endpoints
-├── fmp.py           # FMP and SEC EDGAR data client with caching; ETF CRI estimation
+├── main.py          # FastAPI server - all REST endpoints
+├── fmp.py           # FMP and SEC EDGAR data client with caching - ETF CRI estimation
 ├── calculator.py    # Zakat calculation logic (CRI method)
 ├── static/
 │   └── index.html   # Single-page frontend
