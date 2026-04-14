@@ -286,7 +286,7 @@ tbody tr:hover td { background: #f9fafb; }
     <div>
       <div class="summary-label">Total Zakat Due</div>
       <div class="summary-amount" id="totalZakat">$0.00</div>
-      <div class="summary-note">2.5% of Zakatable Base — equities + cash</div>
+      <div class="summary-note">2.5% of Zakatable Base (equities + cash)</div>
     </div>
     <div class="summary-stat">
       <div class="summary-label">Portfolio Value</div>
@@ -368,8 +368,8 @@ tbody tr:hover td { background: #f9fafb; }
 function _buildBookmarklet() {
   return 'javascript:(function(){' +
     'try{' +
-    // Open the app window FIRST — must be the synchronous result of the click
-    // so browsers allow it without treating it as a blocked popup.
+    // Open the app window FIRST (must be the synchronous result of the click
+    // so browsers allow it without treating it as a blocked popup)
     'var w=window.open("http://localhost:8000/","zakat_calc");' +
     'var SKIP=new Set(["AM","PM","USD","ETF","IRA","NAV","FZSXX","SIPC","TOT","TTL"]);' +
     'var tickerByRow={};' +
@@ -418,7 +418,7 @@ function copyBookmarklet() {
       hint.textContent = 'Click to copy';
     }, 4000);
   }).catch(function() {
-    alert('Copy failed — please manually copy this URL:\n\n' + _buildBookmarklet());
+    alert('Copy failed. Please manually copy this URL:\n\n' + _buildBookmarklet());
   });
 }
 
@@ -627,21 +627,33 @@ async function loadCash() {
   renderCash(data);
 }
 
-function renderCash({ entries }) {
-  entries = entries || [];
+function renderCash({ entries, total_amount, total_zakat }) {
+  entries      = entries      || [];
+  total_amount = total_amount || 0;
+  total_zakat  = total_zakat  || 0;
   const body = document.getElementById('cashTableBody');
   if (!entries.length) {
     body.innerHTML = '<tr><td colspan="4"><div class="empty" style="padding:24px 20px"><p>No cash accounts added yet.</p></div></td></tr>';
     return;
   }
-  body.innerHTML = entries.map(function (e) {
+  var rows = entries.map(function (e) {
     return '<tr>' +
       '<td>' + esc(e.name) + '</td>' +
       '<td class="num">' + fmt$(e.amount) + '</td>' +
       '<td class="num zakat-val">' + fmt$(e.zakat_due) + '</td>' +
-      '<td><button class="btn-del" onclick="deleteCash(\'' + e.id + '\')">Remove</button></td>' +
+      '<td><button class="btn-del" onclick="deleteCash(\'' + esc(e.id) + '\')">Remove</button></td>' +
     '</tr>';
-  }).join('');
+  });
+  // Totals row (only shown when there are entries)
+  rows.push(
+    '<tr style="border-top:2px solid var(--border);font-weight:700">' +
+      '<td>Total</td>' +
+      '<td class="num">' + fmt$(total_amount) + '</td>' +
+      '<td class="num zakat-val">' + fmt$(total_zakat) + '</td>' +
+      '<td></td>' +
+    '</tr>'
+  );
+  body.innerHTML = rows.join('');
 }
 
 async function addCash() {

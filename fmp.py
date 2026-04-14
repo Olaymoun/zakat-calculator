@@ -1,5 +1,5 @@
 """
-FMP API client — uses /stable/ endpoints (required for this API key tier).
+FMP API client - uses /stable/ endpoints (required for this API key tier).
 SEC EDGAR is used as a free fallback for balance-sheet data when FMP returns 402.
 
 Call budget per update run (N tickers):
@@ -29,7 +29,7 @@ PRICE_TTL_DAYS        = 1    # cache prices for 1 day (fallback when FMP is rate
 ETF_HOLDINGS_TTL_DAYS = 7    # ETF holdings rebalance infrequently
 ETF_TOP_N             = 10   # enrich top-N holdings for CRI estimation
 
-# SEC EDGAR — completely free, covers all US-listed companies
+# SEC EDGAR: completely free, covers all US-listed companies
 EDGAR_BASE       = "https://data.sec.gov/api/xbrl/companyconcept"
 EDGAR_TICKERS    = "https://www.sec.gov/files/company_tickers.json"
 EDGAR_CIK_CACHE  = Path(__file__).parent / "data" / "edgar_cik.json"
@@ -73,7 +73,7 @@ async def enrich_positions(tickers: list, api_key: str) -> dict:
     Returns { ticker: { cri_per_share, price, shares_outstanding, ... } }
 
     Calls made per ticker:
-      1 quote (always — price changes daily)
+      1 quote (always fresh: price changes daily)
       1 shares-float (if cache stale, every 7 days)
       1 balance-sheet (if cache stale, every 90 days)
     """
@@ -82,6 +82,7 @@ async def enrich_positions(tickers: list, api_key: str) -> dict:
     cache.setdefault("balance_sheets", {})
     cache.setdefault("shares_float", {})
     cache.setdefault("prices", {})
+    cache.setdefault("etf_holdings", {})
 
     async with httpx.AsyncClient(timeout=30.0) as client:
 
@@ -108,7 +109,7 @@ async def enrich_positions(tickers: list, api_key: str) -> dict:
         for ticker in tickers:
             live_price = quotes.get(ticker, {}).get("price")
             if live_price:
-                # Got a fresh price — update the price cache
+                # Got a fresh price: update the price cache
                 cache["prices"][ticker] = {"price": live_price, "fetched_at": now}
             else:
                 # FMP returned nothing useful (rate-limited / plan restriction).
@@ -166,7 +167,6 @@ async def enrich_positions(tickers: list, api_key: str) -> dict:
         no_bs_final = [t for t in tickers if not cache["balance_sheets"].get(t, {}).get("data")]
         etf_cri_map: dict = {}
         if no_bs_final:
-            cache.setdefault("etf_holdings", {})
             for ticker in no_bs_final:
                 etf_cri = await _compute_etf_cri(ticker, cache, now, client, api_key)
                 if etf_cri is not None:
@@ -197,7 +197,7 @@ async def _get(client: httpx.AsyncClient, url: str, params: dict):
     try:
         resp = await client.get(url, params=params)
         if resp.status_code in (402, 403, 429):
-            logger.warning("%d on %s — endpoint not available on this plan or rate-limited",
+            logger.warning("%d on %s: endpoint not available on this plan or rate-limited",
                            resp.status_code, url)
             return None
         resp.raise_for_status()
@@ -210,7 +210,7 @@ async def _get(client: httpx.AsyncClient, url: str, params: dict):
 # ─── SEC EDGAR helpers ────────────────────────────────────────────────────────
 
 async def _edgar_cik_map(client: httpx.AsyncClient) -> dict:
-    """Return {TICKER: '0000320193', ...} — cached locally for 90 days."""
+    """Return {TICKER: '0000320193', ...}, cached locally for 90 days."""
     if EDGAR_CIK_CACHE.exists():
         try:
             cached = json.loads(EDGAR_CIK_CACHE.read_text())
@@ -243,11 +243,13 @@ async def _edgar_balance_sheet(cik: str, ticker: str, client: httpx.AsyncClient)
     """
     headers = {"User-Agent": EDGAR_USER_AGENT}
 
-    def _latest_usd(entries: list) -> int:
+    def _latest_usd(entries: list) -> tuple:
         """Most recent 10-Q or 10-K instant USD value.
 
         Prefers 10-Q entries over 10-K entries for the same end date to avoid
         cases where some 10-K filings report shares/values on a different scale.
+
+        Returns (value, end_date) where end_date is the ISO date string or None.
         """
         candidates = [
             e for e in entries
@@ -255,19 +257,19 @@ async def _edgar_balance_sheet(cik: str, ticker: str, client: httpx.AsyncClient)
             and e.get("val", 0) > 0
         ]
         if not candidates:
-            return 0
+            return 0, None
         # Pick max end date
         max_end = max(e["end"] for e in candidates)
         at_max  = [e for e in candidates if e["end"] == max_end]
         # Prefer 10-Q over 10-K for the same end date (some 10-Ks use different scale)
         q_entries = [e for e in at_max if e.get("form") == "10-Q"]
         chosen = (q_entries or at_max)[0]
-        return chosen.get("val", 0)
+        return chosen.get("val", 0), chosen.get("end")
 
     def _latest_shares(entries: list) -> int:
         """Most recent 10-Q or 10-K instant share count.
 
-        Prefers 10-Q entries over 10-K for the same period — some annual filings
+        Prefers 10-Q entries over 10-K for the same period; some annual filings
         (e.g. NFLX) contain a value ~10x larger than the correct count reported
         in the quarterly filing for the same balance-sheet date.
         Additionally, if the most-recent 10-K value is >3x the most-recent 10-Q
@@ -305,7 +307,8 @@ async def _edgar_balance_sheet(cik: str, ticker: str, client: httpx.AsyncClient)
 
         return latest_q or latest_k or 0
 
-    async def concept_usd(name: str) -> int:
+    async def concept_usd(name: str) -> tuple:
+        """Returns (value, end_date)."""
         url = f"{EDGAR_BASE}/CIK{cik}/us-gaap/{name}.json"
         data = await _get_edgar(client, url, headers)
         return _latest_usd((data or {}).get("units", {}).get("USD", []))
@@ -317,16 +320,18 @@ async def _edgar_balance_sheet(cik: str, ticker: str, client: httpx.AsyncClient)
         return _latest_shares((data or {}).get("units", {}).get("shares", []))
 
     # Cash: try combined field first, then sum the two components
-    cash = await concept_usd("CashCashEquivalentsAndShortTermInvestments")
+    cash, cash_date = await concept_usd("CashCashEquivalentsAndShortTermInvestments")
     if not cash:
-        cash = (await concept_usd("CashAndCashEquivalentsAtCarryingValue") +
-                await concept_usd("ShortTermInvestments"))
+        cash_a, cash_a_date = await concept_usd("CashAndCashEquivalentsAtCarryingValue")
+        cash_b, _           = await concept_usd("ShortTermInvestments")
+        cash      = cash_a + cash_b
+        cash_date = cash_a_date
 
-    receivables = await concept_usd("AccountsReceivableNetCurrent")
+    receivables, recv_date = await concept_usd("AccountsReceivableNetCurrent")
     if not receivables:
-        receivables = await concept_usd("ReceivablesNetCurrent")
+        receivables, recv_date = await concept_usd("ReceivablesNetCurrent")
 
-    inventory = await concept_usd("InventoryNet")
+    inventory, inv_date = await concept_usd("InventoryNet")
 
     # Shares outstanding: try CommonStockSharesOutstanding first, then fall back
     # to the weighted-average concept which more companies file consistently.
@@ -350,11 +355,15 @@ async def _edgar_balance_sheet(cik: str, ticker: str, client: httpx.AsyncClient)
         # If CSO sanity fails against WeightedAvg, WeightedAvg will be preferred
         # inside _latest_shares already via the 3× check.
     else:
-        # CSO data is absent or stale — use weighted-average as primary source
+        # CSO data is absent or stale; use weighted-average as primary source
         shares = wavg_shares or _latest_shares(cso_entries)
 
     if not cash and not receivables and not inventory:
-        return {}   # no useful data — don't cache as success
+        return {}   # no useful data, do not cache as success
+
+    # Use the most recent end date seen across all CRI components as the reporting period.
+    all_dates = [d for d in [cash_date, recv_date, inv_date] if d]
+    reporting_date = max(all_dates) if all_dates else None
 
     return {
         "cashAndShortTermInvestments":  cash,
@@ -363,12 +372,13 @@ async def _edgar_balance_sheet(cik: str, ticker: str, client: httpx.AsyncClient)
         # Store None (not 0) when shares are unavailable so _compute_cri can
         # distinguish "we have a real zero" from "we never got data".
         "commonStockSharesOutstanding": shares if shares else None,
+        "date":                         reporting_date,
         "source":                       "edgar",
     }
 
 
 async def _get_edgar(client: httpx.AsyncClient, url: str, headers: dict):
-    """Quiet GET for EDGAR — 404 is normal (concept doesn't exist for this company)."""
+    """Quiet GET for EDGAR. 404 is normal (concept does not exist for this company)."""
     try:
         resp = await client.get(url, headers=headers, timeout=20.0)
         if resp.status_code == 404:
@@ -507,10 +517,12 @@ async def _compute_etf_cri(
 # ─── CRI computation ──────────────────────────────────────────────────────────
 
 def _compute_cri(ticker: str, bs: dict, sf: dict, quote: dict) -> dict:
-    # Balance-sheet CRI components (null → 0 per spec)
-    cash        = (bs.get("cashAndShortTermInvestments") or
-                   (bs.get("cashAndCashEquivalents", 0) or 0) +
-                   (bs.get("shortTermInvestments", 0) or 0))
+    # Balance-sheet CRI components (null treated as 0 per spec).
+    # Use explicit None checks so a legitimate zero value is not treated as missing.
+    raw_cash = bs.get("cashAndShortTermInvestments")
+    if raw_cash is None:
+        raw_cash = (bs.get("cashAndCashEquivalents") or 0) + (bs.get("shortTermInvestments") or 0)
+    cash        = raw_cash
     receivables = bs.get("netReceivables") or 0
     inventory   = bs.get("inventory")     or 0
     cri_value   = cash + receivables + inventory
@@ -529,7 +541,7 @@ def _compute_cri(ticker: str, bs: dict, sf: dict, quote: dict) -> dict:
         cri_per_share = cri_value / shares_outstanding
     else:
         cri_per_share = 0
-        logger.warning("No shares outstanding data for %s — cri_per_share will be 0", ticker)
+        logger.warning("No shares outstanding data for %s; cri_per_share will be 0", ticker)
 
     return {
         "cri_value":             round(cri_value, 2),

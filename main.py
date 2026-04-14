@@ -1,5 +1,5 @@
 """
-Zakat Calculator — FastAPI backend
+Zakat Calculator - FastAPI backend
 Run: python main.py   (opens http://127.0.0.1:8000)
 
 Position data flow:
@@ -10,6 +10,7 @@ Position data flow:
 
 import json
 import logging
+import math
 import os
 import uuid
 from pathlib import Path
@@ -27,7 +28,7 @@ from fmp import enrich_positions
 
 load_dotenv()
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(name)s — %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 # ─── paths ────────────────────────────────────────────────────────────────────
@@ -49,7 +50,7 @@ def _load(path: Path, default):
 
 
 def _save(path: Path, data):
-    path.write_text(json.dumps(data, indent=2))
+    path.write_text(json.dumps(data, indent=2, allow_nan=False))
 
 
 # ─── app ──────────────────────────────────────────────────────────────────────
@@ -58,7 +59,7 @@ app = FastAPI(title="Zakat Calculator")
 # CORS is required so the bookmarklet (running on fidelity.com) can POST here.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # local-only app — no security risk
+    allow_origins=["*"],   # local-only app, no security risk
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -67,6 +68,7 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 # In-memory job tracker  { job_id: { status, message, done, error } }
 _jobs: dict = {}
+_JOBS_MAX = 50   # keep at most this many completed jobs in memory
 
 
 # ─── routes ───────────────────────────────────────────────────────────────────
@@ -97,8 +99,9 @@ async def get_portfolio():
     equity_zakat       = sum(r["zakat_due"]    for r in results)
     total_market_value = sum(r["market_value"] for r in results)
 
-    cash_entries    = _load(CASH_FILE, [])
-    total_cash_zakat = sum(e.get("amount", 0) * 0.025 for e in cash_entries)
+    # Use per-entry rounded values so the sum matches the cash table display exactly.
+    cash_entries     = _load(CASH_FILE, [])
+    total_cash_zakat = sum(round(e.get("amount", 0) * 0.025, 2) for e in cash_entries)
 
     return {
         "positions":          results,
@@ -118,7 +121,7 @@ class RawPosition(BaseModel):
 @app.post("/api/positions")
 async def receive_positions(positions: list[RawPosition], background_tasks: BackgroundTasks):
     """
-    Called by the bookmarklet.  Accepts only ticker + shares — nothing else.
+    Called by the bookmarklet. Accepts only ticker + shares.
     Immediately kicks off FMP enrichment in the background.
     """
     if not positions:
@@ -140,7 +143,7 @@ async def receive_positions(positions: list[RawPosition], background_tasks: Back
     return {"job_id": job_id, "count": len(raw)}
 
 
-# ─── "Refresh FMP prices" button — re-enriches existing positions ─────────────
+# ─── "Refresh FMP prices" button: re-enriches existing positions ──────────────
 
 @app.post("/api/update")
 async def refresh_fmp(background_tasks: BackgroundTasks):
@@ -228,12 +231,15 @@ async def get_cash():
 
 @app.post("/api/cash")
 async def add_cash(entry: CashEntry):
-    if entry.amount <= 0:
-        raise HTTPException(status_code=400, detail="Amount must be positive.")
+    name = entry.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Name must not be empty.")
+    if not math.isfinite(entry.amount) or entry.amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be a positive finite number.")
     entries = _load(CASH_FILE, [])
     new_entry = {
         "id":     str(uuid.uuid4())[:8],
-        "name":   entry.name.strip(),
+        "name":   name,
         "amount": round(entry.amount, 2),
     }
     entries.append(new_entry)
@@ -288,6 +294,13 @@ async def _enrich_and_save(job_id: str, raw_positions: list, api_key: str):
             "done":    True,
             "error":   str(exc),
         }
+
+    finally:
+        # Prune completed jobs so the dict does not grow without bound.
+        if len(_jobs) > _JOBS_MAX:
+            done_ids = [k for k, v in list(_jobs.items()) if v.get("done")]
+            for k in done_ids[:len(_jobs) - _JOBS_MAX]:
+                _jobs.pop(k, None)
 
 
 # ─── entrypoint ───────────────────────────────────────────────────────────────
