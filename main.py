@@ -114,14 +114,16 @@ async def get_portfolio():
 # ─── bookmarklet pushes positions here ───────────────────────────────────────
 
 class RawPosition(BaseModel):
-    ticker: str
-    shares: float
+    ticker:  str
+    shares:  float
+    price:   float = 0.0   # price scraped from Fidelity page (0 = not available)
+    account: str   = ""    # account name scraped from Fidelity page
 
 
 @app.post("/api/positions")
 async def receive_positions(positions: list[RawPosition], background_tasks: BackgroundTasks):
     """
-    Called by the bookmarklet. Accepts only ticker + shares.
+    Called by the bookmarklet. Accepts ticker, shares, and optionally price and account.
     Immediately kicks off FMP enrichment in the background.
     """
     if not positions:
@@ -132,7 +134,9 @@ async def receive_positions(positions: list[RawPosition], background_tasks: Back
     if not api_key:
         raise HTTPException(status_code=400, detail="FMP API key not configured.")
 
-    raw = [{"ticker": p.ticker.upper(), "shares": p.shares} for p in positions]
+    raw = [{"ticker": p.ticker.upper(), "shares": p.shares,
+            "fidelity_price": p.price,   # stored separately so refresh never confuses it with an old FMP price
+            "account": p.account.strip()} for p in positions]
     logger.info("Received %d position(s) from bookmarklet: %s",
                 len(raw), [p["ticker"] for p in raw])
 
@@ -265,18 +269,23 @@ async def _enrich_and_save(job_id: str, raw_positions: list, api_key: str):
         _jobs[job_id]["message"] = msg
 
     try:
-        tickers = [p["ticker"] for p in raw_positions]
-        log(f"Fetching FMP data for {len(tickers)} ticker(s)…")
+        # Deduplicate tickers for enrichment (same stock can appear in multiple accounts)
+        unique_tickers = list(dict.fromkeys(p["ticker"] for p in raw_positions))
+        log(f"Fetching FMP data for {len(unique_tickers)} unique ticker(s)…")
 
-        cri_map = await enrich_positions(tickers, api_key)
+        cri_map = await enrich_positions(unique_tickers, api_key)
 
         enriched = []
         for pos in raw_positions:
             ticker = pos["ticker"]
             cri    = cri_map.get(ticker, {"cri_per_share": 0, "cri_value": 0})
-            if not pos.get("price") and cri.get("price"):
-                pos["price"] = cri["price"]
-            enriched.append({**pos, **cri})
+            # fidelity_price is only ever set by the bookmarklet; it persists across
+            # refresh cycles and always wins over FMP's price (which returns 0 on the free plan).
+            fidelity_price = pos.get("fidelity_price") or 0
+            fmp_price      = cri.get("price") or 0
+            merged         = {**pos, **cri}
+            merged["price"] = fidelity_price or fmp_price
+            enriched.append(merged)
 
         _save(PORTFOLIO_FILE, enriched)
         _jobs[job_id] = {

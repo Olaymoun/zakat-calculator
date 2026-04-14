@@ -27,6 +27,7 @@ BS_MISS_TTL_DAYS      = 1    # retry failed/empty balance-sheet lookups after 1 
 FLOAT_TTL_DAYS        = 7    # shares-float changes slowly
 PRICE_TTL_DAYS        = 1    # cache prices for 1 day (fallback when FMP is rate-limited)
 ETF_HOLDINGS_TTL_DAYS = 7    # ETF holdings rebalance infrequently
+ETF_MISS_TTL_DAYS     = 1    # retry failed ETF holdings lookups after 1 day
 ETF_TOP_N             = 10   # enrich top-N holdings for CRI estimation
 
 # SEC EDGAR: completely free, covers all US-listed companies
@@ -413,10 +414,17 @@ async def _compute_etf_cri(
       5. Extrapolate to the full fund and scale by the ETF price.
     """
     # ── 1. Fetch / cache ETF holdings ────────────────────────────────────────
+    # Use a short TTL for misses so we retry with the fallback endpoint sooner.
     cached_h = cache["etf_holdings"].get(ticker, {})
-    if _is_stale(cached_h.get("fetched_at"), ETF_HOLDINGS_TTL_DAYS):
+    has_data  = bool(cached_h.get("data"))
+    etf_ttl   = ETF_HOLDINGS_TTL_DAYS if has_data else ETF_MISS_TTL_DAYS
+    if _is_stale(cached_h.get("fetched_at"), etf_ttl):
+        # Try etf-holder first, then etf-holdings as fallback (plan differences)
         raw = await _get(client, f"{FMP_BASE}/etf-holder",
                          {"symbol": ticker, "apikey": api_key})
+        if not (isinstance(raw, list) and raw):
+            raw = await _get(client, f"{FMP_BASE}/etf-holdings",
+                             {"symbol": ticker, "apikey": api_key})
         if isinstance(raw, list) and raw:
             cache["etf_holdings"][ticker] = {"data": raw, "fetched_at": now}
         else:
@@ -424,7 +432,7 @@ async def _compute_etf_cri(
 
     holdings = cache["etf_holdings"].get(ticker, {}).get("data", [])
     if not holdings:
-        return None   # not an ETF (or no holdings data)
+        return None   # not an ETF or holdings data unavailable
 
     # ── 2. Top N holdings by weight ───────────────────────────────────────────
     top_h = sorted(holdings, key=lambda h: h.get("weightPercentage", 0), reverse=True)
@@ -436,7 +444,7 @@ async def _compute_etf_cri(
     logger.info("ETF %s: enriching top-%d holdings for CRI: %s", ticker, len(sub_tickers), sub_tickers)
 
     # ── 3. Enrich sub-tickers using the shared cache ──────────────────────────
-    # Quotes
+    # Quotes (try /quote then /profile as fallback, same as main enrichment)
     sub_quotes: dict = {}
     for st in sub_tickers:
         cached_p = cache["prices"].get(st, {})
@@ -445,8 +453,12 @@ async def _compute_etf_cri(
         else:
             q = await _get(client, f"{FMP_BASE}/quote", {"symbol": st, "apikey": api_key})
             item = (q or [None])[0] if isinstance(q, list) else None
+            if not (item and item.get("price")):
+                # fallback to profile endpoint
+                p = await _get(client, f"{FMP_BASE}/profile", {"symbol": st, "apikey": api_key})
+                item = (p or [None])[0] if isinstance(p, list) else None
             if item and item.get("price"):
-                sub_quotes[st] = item
+                sub_quotes[st] = {"price": item["price"]}
                 cache["prices"][st] = {"price": item["price"], "fetched_at": now}
 
     # Shares float

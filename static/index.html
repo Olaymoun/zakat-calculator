@@ -173,7 +173,8 @@ tbody td { padding: 13px 16px; border-bottom: 1px solid #f3f4f6; font-size: .875
 tbody tr:last-child td { border-bottom: none; }
 tbody tr:hover td { background: #f9fafb; }
 
-.ticker   { font-weight: 700; font-size: .95rem; color: var(--navy); }
+.ticker      { font-weight: 700; font-size: .95rem; color: var(--navy); }
+.muted-cell  { font-size: .8rem; color: var(--muted); max-width: 160px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .num      { font-variant-numeric: tabular-nums; font-family: 'SF Mono','Fira Code',ui-monospace,monospace; }
 .zakat-val { font-weight: 700; color: var(--green); }
 
@@ -339,6 +340,7 @@ tbody tr:hover td { background: #f9fafb; }
       <thead>
         <tr>
           <th>Ticker</th>
+          <th>Account</th>
           <th>Shares</th>
           <th>Market Price</th>
           <th>Market Value</th>
@@ -349,7 +351,7 @@ tbody tr:hover td { background: #f9fafb; }
         </tr>
       </thead>
       <tbody id="tableBody">
-        <tr><td colspan="8">
+        <tr><td colspan="9">
           <div class="empty">
             <h3>No positions loaded yet</h3>
             <p>Follow the setup steps above, then click the bookmarklet on your Fidelity Positions page.</p>
@@ -393,9 +395,31 @@ function _buildBookmarklet() {
       'var shares=parseFloat(cell.textContent.trim().replace(/,/g,""));' +
       'if(!isNaN(shares)&&shares>0)sharesByRow[idx]=shares;' +
     '});' +
+    // Capture last price - try common Fidelity column IDs
+    'var priceByRow={};' +
+    '["lastPrice","last","price","mktPrice"].forEach(function(cid){' +
+      'document.querySelectorAll("[col-id=\'"+cid+"\']").forEach(function(cell){' +
+        'var row=cell.closest(".ag-row");' +
+        'var idx=row&&row.getAttribute("row-index");' +
+        'if(!idx||priceByRow[idx])return;' +
+        'var p=parseFloat(cell.textContent.trim().replace(/[$,]/g,""));' +
+        'if(!isNaN(p)&&p>0)priceByRow[idx]=p;' +
+      '});' +
+    '});' +
+    // Capture account names from ag-grid group header rows
+    'var accountByRow={};' +
+    'var lastAcct="";' +
+    'Array.from(document.querySelectorAll(".ag-row")).sort(function(a,b){' +
+      'return(parseInt(a.getAttribute("row-index"))||0)-(parseInt(b.getAttribute("row-index"))||0);' +
+    '}).forEach(function(row){' +
+      'var gv=row.querySelector(".ag-group-value");' +
+      'if(gv){var txt=gv.textContent.trim().replace(/\\s+/g," ");if(txt)lastAcct=txt;}' +
+      'var idx=row.getAttribute("row-index");' +
+      'if(idx)accountByRow[idx]=lastAcct;' +
+    '});' +
     'var positions=[];' +
     'Object.keys(tickerByRow).forEach(function(idx){' +
-      'if(sharesByRow[idx])positions.push({ticker:tickerByRow[idx],shares:sharesByRow[idx]});' +
+      'if(sharesByRow[idx])positions.push({ticker:tickerByRow[idx],shares:sharesByRow[idx],price:priceByRow[idx]||0,account:accountByRow[idx]||""});' +
     '});' +
     'if(positions.length===0){if(w)w.close();alert("No positions found. Make sure you are on the Fidelity Positions page.");return;}' +
     'var url="http://localhost:8000/?zakat_import="+encodeURIComponent(JSON.stringify(positions));' +
@@ -529,7 +553,7 @@ function renderPortfolio({ positions, total_zakat, total_market_value, total_cas
 
   const body = document.getElementById('tableBody');
   if (!positions.length) {
-    body.innerHTML = '<tr><td colspan="8"><div class="empty"><h3>No positions loaded yet</h3><p>Follow the setup steps above, then click the bookmarklet on your Fidelity Positions page.</p></div></td></tr>';
+    body.innerHTML = '<tr><td colspan="9"><div class="empty"><h3>No positions loaded yet</h3><p>Follow the setup steps above, then click the bookmarklet on your Fidelity Positions page.</p></div></td></tr>';
     return;
   }
 
@@ -541,20 +565,27 @@ function renderPortfolio({ positions, total_zakat, total_market_value, total_cas
     if (p.is_etf_estimated) {
       tip = 'ETF: CRI estimated from top holdings (weighted avg)';
     } else if (p.cri_per_share) {
-      tip = 'Cash $' + fmtNum(p.cash_component||0) + ' + Recv $' + fmtNum(p.receivables_component||0) + ' + Inv $' + fmtNum(p.inventory_component||0) + ' \u00f7 ' + fmtNum(p.shares_outstanding||0) + ' shares';
+      tip = 'Cash $' + fmtNum(p.cash_component||0) + ' + Recv $' + fmtNum(p.receivables_component||0) + ' + Inv $' + fmtNum(p.inventory_component||0) + ' / ' + fmtNum(p.shares_outstanding||0) + ' shares';
     } else {
       tip = 'No CRI data';
     }
     var isFund = (p.intent || 'fundamental') === 'fundamental';
-    var etfBadge = p.is_etf_estimated ? '<span class="badge-etf" title="CRI estimated from ETF holdings">ETF est.</span>' : '';
+    var badges = '';
+    if (p.is_etf_estimated) {
+      badges += '<span class="badge-etf" title="CRI estimated from ETF holdings">ETF est.</span>';
+    } else if (!p.cri_per_share && !p.error) {
+      badges += '<span class="badge-etf" style="background:#fff7ed;color:#c2410c" title="ETF or no balance sheet data available; switch to Trading intent for full market value">ETF / no CRI</span>';
+    }
+    if (p.error) badges += '<span class="badge-err" title="' + esc(p.error) + '">No data</span>';
     return '<tr>' +
-      '<td><span class="ticker">' + p.ticker + '</span>' + etfBadge + (p.error ? '<span class="badge-err" title="' + esc(p.error) + '">No FMP data</span>' : '') + '</td>' +
+      '<td><span class="ticker">' + esc(p.ticker) + '</span>' + badges + '</td>' +
+      '<td class="muted-cell">' + esc(p.account || '') + '</td>' +
       '<td class="num">' + fmtNum(p.shares) + '</td>' +
       '<td class="num">' + fmt$(p.price||0) + '</td>' +
       '<td class="num">' + fmt$(p.market_value||0) + '</td>' +
       '<td><div class="toggle">' +
-        '<button class="' + (isFund ? 'on-fundamental' : '') + '" onclick="setIntent(\'' + p.ticker + '\',\'fundamental\')">Long-term</button>' +
-        '<button class="' + (!isFund ? 'on-active' : '') + '" onclick="setIntent(\'' + p.ticker + '\',\'active\')">Trading</button>' +
+        '<button class="' + (isFund ? 'on-fundamental' : '') + '" onclick="setIntent(\'' + esc(p.ticker) + '\',\'fundamental\')">Long-term</button>' +
+        '<button class="' + (!isFund ? 'on-active' : '') + '" onclick="setIntent(\'' + esc(p.ticker) + '\',\'active\')">Trading</button>' +
       '</div></td>' +
       '<td class="num"><span class="tip" data-tip="' + esc(tip) + '">' + fmt$(p.cri_per_share||0, 4) + '</span></td>' +
       '<td class="num">' + fmt$(p.zakatable_base||0) + '</td>' +
