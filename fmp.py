@@ -22,10 +22,12 @@ logger = logging.getLogger(__name__)
 FMP_BASE   = "https://financialmodelingprep.com/stable"
 CACHE_FILE = Path(__file__).parent / "data" / "fmp_cache.json"
 
-BS_TTL_DAYS       = 90   # balance sheets are quarterly
-BS_MISS_TTL_DAYS  = 1    # retry failed/empty balance-sheet lookups after 1 day
-FLOAT_TTL_DAYS    = 7    # shares-float changes slowly
-PRICE_TTL_DAYS    = 1    # cache prices for 1 day (fallback when FMP is rate-limited)
+BS_TTL_DAYS           = 90   # balance sheets are quarterly
+BS_MISS_TTL_DAYS      = 1    # retry failed/empty balance-sheet lookups after 1 day
+FLOAT_TTL_DAYS        = 7    # shares-float changes slowly
+PRICE_TTL_DAYS        = 1    # cache prices for 1 day (fallback when FMP is rate-limited)
+ETF_HOLDINGS_TTL_DAYS = 7    # ETF holdings rebalance infrequently
+ETF_TOP_N             = 10   # enrich top-N holdings for CRI estimation
 
 # SEC EDGAR — completely free, covers all US-listed companies
 EDGAR_BASE       = "https://data.sec.gov/api/xbrl/companyconcept"
@@ -43,7 +45,7 @@ def _load_cache() -> dict:
             return json.loads(CACHE_FILE.read_text())
         except Exception:
             pass
-    return {"balance_sheets": {}, "shares_float": {}, "prices": {}}
+    return {"balance_sheets": {}, "shares_float": {}, "prices": {}, "etf_holdings": {}}
 
 
 def _save_cache(cache: dict):
@@ -157,6 +159,20 @@ async def enrich_positions(tickers: list, api_key: str) -> dict:
                     logger.info("Got EDGAR balance sheet for %s", ticker)
                     cache["balance_sheets"][ticker] = {"data": edgar_bs, "fetched_at": now}
 
+        # ── ETF CRI estimation for tickers still without balance sheet ─────────
+        # ETFs have no meaningful balance sheet of their own.  Instead, fetch the
+        # ETF's top holdings, enrich those underlying stocks, and compute a
+        # weighted-average CRI ratio scaled by the ETF price.
+        no_bs_final = [t for t in tickers if not cache["balance_sheets"].get(t, {}).get("data")]
+        etf_cri_map: dict = {}
+        if no_bs_final:
+            cache.setdefault("etf_holdings", {})
+            for ticker in no_bs_final:
+                etf_cri = await _compute_etf_cri(ticker, cache, now, client, api_key)
+                if etf_cri is not None:
+                    etf_cri_map[ticker] = etf_cri
+                    logger.info("ETF CRI estimated for %s: %.6f per share", ticker, etf_cri)
+
     _save_cache(cache)
 
     results = {}
@@ -164,7 +180,13 @@ async def enrich_positions(tickers: list, api_key: str) -> dict:
         q   = quotes.get(ticker, {})
         sf  = cache["shares_float"][ticker]["data"] if ticker in cache["shares_float"] else {}
         bs  = cache["balance_sheets"][ticker]["data"] if ticker in cache["balance_sheets"] else {}
-        results[ticker] = _compute_cri(ticker, bs, sf, q)
+        r   = _compute_cri(ticker, bs, sf, q)
+
+        if ticker in etf_cri_map:
+            r["cri_per_share"]    = round(etf_cri_map[ticker], 6)
+            r["is_etf_estimated"] = True
+
+        results[ticker] = r
 
     return results
 
@@ -356,6 +378,130 @@ async def _get_edgar(client: httpx.AsyncClient, url: str, headers: dict):
     except Exception as exc:
         logger.debug("EDGAR concept fetch failed (%s): %s", url, exc)
         return None
+
+
+# ─── ETF CRI estimation ───────────────────────────────────────────────────────
+
+async def _compute_etf_cri(
+    ticker: str,
+    cache: dict,
+    now: str,
+    client,
+    api_key: str,
+) -> Optional[float]:
+    """
+    Estimate CRI per share for an ETF by inspecting its top holdings.
+
+    Returns the estimated CRI per share (float), or None if the ticker is not
+    an ETF or insufficient data is available.
+
+    Algorithm:
+      1. Fetch holdings from /stable/etf-holder (cached ETF_HOLDINGS_TTL_DAYS days).
+      2. Take the top ETF_TOP_N holdings by weight.
+      3. Enrich those stocks (quote + float + balance-sheet) using the shared cache.
+      4. Compute a weighted-average CRI ratio = Σ(w_i * cri_per_share_i / price_i).
+      5. Extrapolate to the full fund and scale by the ETF price.
+    """
+    # ── 1. Fetch / cache ETF holdings ────────────────────────────────────────
+    cached_h = cache["etf_holdings"].get(ticker, {})
+    if _is_stale(cached_h.get("fetched_at"), ETF_HOLDINGS_TTL_DAYS):
+        raw = await _get(client, f"{FMP_BASE}/etf-holder",
+                         {"symbol": ticker, "apikey": api_key})
+        if isinstance(raw, list) and raw:
+            cache["etf_holdings"][ticker] = {"data": raw, "fetched_at": now}
+        else:
+            cache["etf_holdings"][ticker] = {"data": [], "fetched_at": now}
+
+    holdings = cache["etf_holdings"].get(ticker, {}).get("data", [])
+    if not holdings:
+        return None   # not an ETF (or no holdings data)
+
+    # ── 2. Top N holdings by weight ───────────────────────────────────────────
+    top_h = sorted(holdings, key=lambda h: h.get("weightPercentage", 0), reverse=True)
+    top_h = [h for h in top_h if h.get("asset")][:ETF_TOP_N]
+    sub_tickers = [h["asset"] for h in top_h]
+    if not sub_tickers:
+        return None
+
+    logger.info("ETF %s: enriching top-%d holdings for CRI: %s", ticker, len(sub_tickers), sub_tickers)
+
+    # ── 3. Enrich sub-tickers using the shared cache ──────────────────────────
+    # Quotes
+    sub_quotes: dict = {}
+    for st in sub_tickers:
+        cached_p = cache["prices"].get(st, {})
+        if not _is_stale(cached_p.get("fetched_at"), PRICE_TTL_DAYS) and cached_p.get("price"):
+            sub_quotes[st] = {"price": cached_p["price"]}
+        else:
+            q = await _get(client, f"{FMP_BASE}/quote", {"symbol": st, "apikey": api_key})
+            item = (q or [None])[0] if isinstance(q, list) else None
+            if item and item.get("price"):
+                sub_quotes[st] = item
+                cache["prices"][st] = {"price": item["price"], "fetched_at": now}
+
+    # Shares float
+    stale_float = [t for t in sub_tickers
+                   if _is_stale(cache["shares_float"].get(t, {}).get("fetched_at"), FLOAT_TTL_DAYS)]
+    for st in stale_float:
+        data = await _get(client, f"{FMP_BASE}/shares-float", {"symbol": st, "apikey": api_key})
+        item = (data or [None])[0] if isinstance(data, list) else None
+        cache["shares_float"][st] = {"data": item or {}, "fetched_at": now}
+
+    # Balance sheets
+    def _bs_stale(t: str) -> bool:
+        entry = cache["balance_sheets"].get(t, {})
+        ttl = BS_TTL_DAYS if entry.get("data") else BS_MISS_TTL_DAYS
+        return _is_stale(entry.get("fetched_at"), ttl)
+
+    stale_bs = [t for t in sub_tickers if _bs_stale(t)]
+    for st in stale_bs:
+        data = await _get(client, f"{FMP_BASE}/balance-sheet-statement",
+                          {"symbol": st, "limit": 1, "apikey": api_key})
+        item = (data or [None])[0] if isinstance(data, list) else None
+        cache["balance_sheets"][st] = {"data": item or {}, "fetched_at": now}
+
+    # EDGAR fallback for sub-tickers still missing a balance sheet
+    no_sub_bs = [t for t in sub_tickers if not cache["balance_sheets"].get(t, {}).get("data")]
+    if no_sub_bs:
+        cik_map = await _edgar_cik_map(client)
+        for st in no_sub_bs:
+            cik = cik_map.get(st.upper())
+            if cik:
+                edgar_bs = await _edgar_balance_sheet(cik, st, client)
+                if edgar_bs:
+                    cache["balance_sheets"][st] = {"data": edgar_bs, "fetched_at": now}
+
+    # ── 4. Weighted-average CRI ratio ─────────────────────────────────────────
+    covered_weight   = 0.0
+    weighted_ratio   = 0.0
+
+    for h in top_h:
+        st     = h["asset"]
+        weight = h.get("weightPercentage", 0) / 100.0
+        sf     = cache["shares_float"].get(st, {}).get("data", {})
+        bs     = cache["balance_sheets"].get(st, {}).get("data", {})
+        q      = sub_quotes.get(st, {})
+
+        cri_data = _compute_cri(st, bs, sf, q)
+        price    = cri_data.get("price", 0)
+        cri_ps   = cri_data.get("cri_per_share", 0)
+
+        if price > 0:
+            weighted_ratio += weight * (cri_ps / price)
+            covered_weight += weight
+
+    if covered_weight == 0:
+        return None
+
+    # Extrapolate from covered weight to full fund
+    full_ratio = weighted_ratio / covered_weight
+
+    # ── 5. Scale by ETF price ─────────────────────────────────────────────────
+    etf_price = (cache["prices"].get(ticker, {}).get("price") or 0)
+    if not etf_price:
+        return None
+
+    return full_ratio * etf_price
 
 
 # ─── CRI computation ──────────────────────────────────────────────────────────

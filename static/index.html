@@ -148,6 +148,18 @@ button {
 .summary-stat   { text-align: right; }
 .summary-stat-num { font-size: 1.8rem; font-weight: 700; }
 
+/* ── Cash section ── */
+.cash-form { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 16px; }
+.cash-form .form-group { flex: 1 1 200px; }
+.btn-add { background: var(--green); color: #fff; }
+.btn-add:hover { filter: brightness(1.1); }
+.btn-del {
+  background: transparent; border: 1.5px solid var(--red);
+  color: var(--red); padding: 5px 12px; border-radius: 6px;
+  font-size: .78rem;
+}
+.btn-del:hover { background: #fef2f2; }
+
 /* ── Table ── */
 .table-card { background: var(--surface); border-radius: var(--radius); box-shadow: 0 1px 4px rgba(0,0,0,.07); overflow: hidden; }
 table { width: 100%; border-collapse: collapse; }
@@ -178,6 +190,12 @@ tbody tr:hover td { background: #f9fafb; }
   display: inline-block; margin-left: 6px;
   background: #fef2f2; color: var(--red);
   font-size: .7rem; font-weight: 600; padding: 1px 7px; border-radius: 99px;
+}
+.badge-etf {
+  display: inline-block; margin-left: 6px;
+  background: #eff6ff; color: #1d4ed8;
+  font-size: .7rem; font-weight: 600; padding: 1px 7px; border-radius: 99px;
+  cursor: help;
 }
 
 .empty { text-align: center; padding: 56px 20px; color: var(--muted); }
@@ -268,15 +286,50 @@ tbody tr:hover td { background: #f9fafb; }
     <div>
       <div class="summary-label">Total Zakat Due</div>
       <div class="summary-amount" id="totalZakat">$0.00</div>
-      <div class="summary-note">2.5% of Zakatable Base across all holdings</div>
+      <div class="summary-note">2.5% of Zakatable Base — equities + cash</div>
     </div>
     <div class="summary-stat">
       <div class="summary-label">Portfolio Value</div>
       <div class="summary-stat-num" id="totalMarketValue">$0.00</div>
     </div>
     <div class="summary-stat">
+      <div class="summary-label">Cash Zakat</div>
+      <div class="summary-stat-num" id="totalCashZakat">$0.00</div>
+    </div>
+    <div class="summary-stat">
       <div class="summary-label">Holdings</div>
       <div class="summary-stat-num" id="holdingsCount">0</div>
+    </div>
+  </div>
+
+  <!-- Cash & Bank Accounts -->
+  <div class="card">
+    <div class="card-title">Cash &amp; Bank Accounts</div>
+    <div class="cash-form">
+      <div class="form-group">
+        <label for="cashName">Account / Description</label>
+        <input type="text" id="cashName" placeholder="e.g. Chase Checking" />
+      </div>
+      <div class="form-group">
+        <label for="cashAmount">Balance ($)</label>
+        <input type="text" id="cashAmount" placeholder="0.00" />
+      </div>
+      <button class="btn-add" onclick="addCash()">Add</button>
+    </div>
+    <div class="table-card">
+      <table>
+        <thead>
+          <tr>
+            <th>Account</th>
+            <th>Balance</th>
+            <th>Zakat Due (2.5%)</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="cashTableBody">
+          <tr><td colspan="4"><div class="empty" style="padding:24px 20px"><p>No cash accounts added yet.</p></div></td></tr>
+        </tbody>
+      </table>
     </div>
   </div>
 
@@ -375,6 +428,7 @@ let _jobId     = null;
 // ── Boot ─────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', function () {
   loadSettings();
+  loadCash();
 
   // Handle bookmarklet import via URL param (avoids CORS/Private Network Access issues)
   var importParam = new URLSearchParams(window.location.search).get('zakat_import');
@@ -462,13 +516,15 @@ async function loadPortfolio() {
   renderPortfolio(data);
 }
 
-function renderPortfolio({ positions, total_zakat, total_market_value }) {
+function renderPortfolio({ positions, total_zakat, total_market_value, total_cash_zakat }) {
   positions          = positions          || [];
   total_zakat        = total_zakat        || 0;
   total_market_value = total_market_value || 0;
+  total_cash_zakat   = total_cash_zakat   || 0;
 
   document.getElementById('totalZakat').textContent        = fmt$(total_zakat);
   document.getElementById('totalMarketValue').textContent  = fmt$(total_market_value);
+  document.getElementById('totalCashZakat').textContent    = fmt$(total_cash_zakat);
   document.getElementById('holdingsCount').textContent     = positions.length;
 
   const body = document.getElementById('tableBody');
@@ -481,12 +537,18 @@ function renderPortfolio({ positions, total_zakat, total_market_value }) {
   document.getElementById('bookmarkletCard').style.display = 'none';
 
   body.innerHTML = positions.map(function (p) {
-    var tip = p.cri_per_share
-      ? 'Cash $' + fmtNum(p.cash_component||0) + ' + Recv $' + fmtNum(p.receivables_component||0) + ' + Inv $' + fmtNum(p.inventory_component||0) + ' \u00f7 ' + fmtNum(p.shares_outstanding||0) + ' shares'
-      : 'No CRI data';
+    var tip;
+    if (p.is_etf_estimated) {
+      tip = 'ETF: CRI estimated from top holdings (weighted avg)';
+    } else if (p.cri_per_share) {
+      tip = 'Cash $' + fmtNum(p.cash_component||0) + ' + Recv $' + fmtNum(p.receivables_component||0) + ' + Inv $' + fmtNum(p.inventory_component||0) + ' \u00f7 ' + fmtNum(p.shares_outstanding||0) + ' shares';
+    } else {
+      tip = 'No CRI data';
+    }
     var isFund = (p.intent || 'fundamental') === 'fundamental';
+    var etfBadge = p.is_etf_estimated ? '<span class="badge-etf" title="CRI estimated from ETF holdings">ETF est.</span>' : '';
     return '<tr>' +
-      '<td><span class="ticker">' + p.ticker + '</span>' + (p.error ? '<span class="badge-err" title="' + esc(p.error) + '">No FMP data</span>' : '') + '</td>' +
+      '<td><span class="ticker">' + p.ticker + '</span>' + etfBadge + (p.error ? '<span class="badge-err" title="' + esc(p.error) + '">No FMP data</span>' : '') + '</td>' +
       '<td class="num">' + fmtNum(p.shares) + '</td>' +
       '<td class="num">' + fmt$(p.price||0) + '</td>' +
       '<td class="num">' + fmt$(p.market_value||0) + '</td>' +
@@ -556,6 +618,63 @@ function resetRefreshBtn() {
   const btn = document.getElementById('refreshBtn');
   btn.disabled = false;
   document.getElementById('refreshBtnText').textContent = 'Refresh FMP Prices';
+}
+
+// ── Cash accounts ─────────────────────────────────────────────────────────────
+async function loadCash() {
+  const res  = await fetch('/api/cash');
+  const data = await res.json();
+  renderCash(data);
+}
+
+function renderCash({ entries }) {
+  entries = entries || [];
+  const body = document.getElementById('cashTableBody');
+  if (!entries.length) {
+    body.innerHTML = '<tr><td colspan="4"><div class="empty" style="padding:24px 20px"><p>No cash accounts added yet.</p></div></td></tr>';
+    return;
+  }
+  body.innerHTML = entries.map(function (e) {
+    return '<tr>' +
+      '<td>' + esc(e.name) + '</td>' +
+      '<td class="num">' + fmt$(e.amount) + '</td>' +
+      '<td class="num zakat-val">' + fmt$(e.zakat_due) + '</td>' +
+      '<td><button class="btn-del" onclick="deleteCash(\'' + e.id + '\')">Remove</button></td>' +
+    '</tr>';
+  }).join('');
+}
+
+async function addCash() {
+  var name   = document.getElementById('cashName').value.trim();
+  var amount = parseFloat(document.getElementById('cashAmount').value.replace(/,/g, ''));
+  if (!name)       { setStatus('error', 'Please enter an account name.');  return; }
+  if (!amount || amount <= 0) { setStatus('error', 'Please enter a valid amount.'); return; }
+
+  var res = await fetch('/api/cash', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: name, amount: amount }),
+  });
+  if (!res.ok) {
+    var d = await res.json();
+    setStatus('error', d.detail || 'Failed to add cash entry.');
+    return;
+  }
+  document.getElementById('cashName').value   = '';
+  document.getElementById('cashAmount').value = '';
+  await loadCash();
+  await loadPortfolio();   // refresh totals
+}
+
+async function deleteCash(id) {
+  var res = await fetch('/api/cash/' + id, { method: 'DELETE' });
+  if (!res.ok) {
+    var d = await res.json();
+    setStatus('error', d.detail || 'Failed to remove entry.');
+    return;
+  }
+  await loadCash();
+  await loadPortfolio();   // refresh totals
 }
 
 // ── Status bar ────────────────────────────────────────────────────────────────

@@ -39,6 +39,7 @@ DATA_DIR.mkdir(exist_ok=True)
 PORTFOLIO_FILE = DATA_DIR / "portfolio.json"
 INTENTS_FILE   = DATA_DIR / "intents.json"
 SETTINGS_FILE  = DATA_DIR / "settings.json"
+CASH_FILE      = DATA_DIR / "cash.json"
 
 
 def _load(path: Path, default):
@@ -93,12 +94,17 @@ async def get_portfolio():
         )
         results.append({**pos, **calc, "intent": intent})
 
-    total_zakat        = sum(r["zakat_due"]    for r in results)
+    equity_zakat       = sum(r["zakat_due"]    for r in results)
     total_market_value = sum(r["market_value"] for r in results)
+
+    cash_entries    = _load(CASH_FILE, [])
+    total_cash_zakat = sum(e.get("amount", 0) * 0.025 for e in cash_entries)
+
     return {
         "positions":          results,
-        "total_zakat":        round(total_zakat, 2),
+        "total_zakat":        round(equity_zakat + total_cash_zakat, 2),
         "total_market_value": round(total_market_value, 2),
+        "total_cash_zakat":   round(total_cash_zakat, 2),
     }
 
 
@@ -195,6 +201,53 @@ async def set_intent(ticker: str, body: IntentBody):
     intents = _load(INTENTS_FILE, {})
     intents[ticker.upper()] = body.intent
     _save(INTENTS_FILE, intents)
+    return {"status": "ok"}
+
+
+# ─── cash accounts ────────────────────────────────────────────────────────────
+
+class CashEntry(BaseModel):
+    name: str
+    amount: float
+
+
+@app.get("/api/cash")
+async def get_cash():
+    entries = _load(CASH_FILE, [])
+    enriched = [
+        {**e, "zakat_due": round(e.get("amount", 0) * 0.025, 2)}
+        for e in entries
+    ]
+    total = sum(e.get("amount", 0) for e in entries)
+    return {
+        "entries":      enriched,
+        "total_amount": round(total, 2),
+        "total_zakat":  round(total * 0.025, 2),
+    }
+
+
+@app.post("/api/cash")
+async def add_cash(entry: CashEntry):
+    if entry.amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be positive.")
+    entries = _load(CASH_FILE, [])
+    new_entry = {
+        "id":     str(uuid.uuid4())[:8],
+        "name":   entry.name.strip(),
+        "amount": round(entry.amount, 2),
+    }
+    entries.append(new_entry)
+    _save(CASH_FILE, entries)
+    return new_entry
+
+
+@app.delete("/api/cash/{entry_id}")
+async def delete_cash(entry_id: str):
+    entries = _load(CASH_FILE, [])
+    new_entries = [e for e in entries if e.get("id") != entry_id]
+    if len(new_entries) == len(entries):
+        raise HTTPException(status_code=404, detail="Cash entry not found.")
+    _save(CASH_FILE, new_entries)
     return {"status": "ok"}
 
 
