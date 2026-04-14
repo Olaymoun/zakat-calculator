@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Zakat Calculator</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:      #f0f2f5;
+  --surface: #ffffff;
+  --navy:    #1a2744;
+  --navy2:   #243358;
+  --green:   #1db954;
+  --blue:    #3b82f6;
+  --red:     #ef4444;
+  --amber:   #f59e0b;
+  --text:    #111827;
+  --muted:   #6b7280;
+  --border:  #e5e7eb;
+  --radius:  12px;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+}
+
+header {
+  background: var(--navy);
+  color: #fff;
+  padding: 18px 36px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  box-shadow: 0 2px 12px rgba(0,0,0,.25);
+}
+header h1 { font-size: 1.35rem; font-weight: 700; letter-spacing: -.3px; }
+header p  { font-size: .8rem; opacity: .6; margin-top: 2px; }
+
+main { max-width: 1280px; margin: 28px auto; padding: 0 20px; }
+
+.card {
+  background: var(--surface);
+  border-radius: var(--radius);
+  box-shadow: 0 1px 4px rgba(0,0,0,.07);
+  padding: 22px 24px;
+  margin-bottom: 18px;
+}
+.card-title {
+  font-size: .75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .6px;
+  color: var(--muted);
+  margin-bottom: 14px;
+}
+
+/* ── Bookmarklet card ── */
+.bookmarklet-card { border: 2px dashed var(--border); background: #fafbff; }
+
+.steps { display: flex; flex-direction: column; gap: 12px; margin-top: 4px; }
+.step  { display: flex; align-items: flex-start; gap: 12px; font-size: .9rem; }
+.step-num {
+  width: 24px; height: 24px; flex-shrink: 0;
+  background: var(--navy); color: #fff;
+  border-radius: 50%; display: flex; align-items: center; justify-content: center;
+  font-size: .75rem; font-weight: 700;
+}
+
+.copy-row { display: flex; align-items: center; gap: 10px; margin-top: 8px; flex-wrap: wrap; }
+.btn-copy {
+  background: var(--navy); color: #fff;
+  padding: 8px 18px; border-radius: 8px;
+  font-size: .9rem; font-weight: 700; cursor: pointer; border: none;
+  transition: background .15s;
+}
+.btn-copy:hover { background: var(--navy2); }
+.btn-copy.copied { background: var(--green); }
+.copy-hint { font-size: .78rem; color: var(--muted); }
+
+/* ── Settings row ── */
+.settings-row { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+.form-group { flex: 1 1 260px; }
+label {
+  display: block;
+  font-size: .75rem; font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 5px;
+  text-transform: uppercase; letter-spacing: .4px;
+}
+input[type=text], input[type=password] {
+  width: 100%; padding: 9px 13px;
+  border: 1.5px solid var(--border); border-radius: 8px;
+  font-size: .9rem; outline: none;
+  transition: border-color .18s; background: #fafafa;
+}
+input:focus { border-color: var(--blue); background: #fff; }
+.link { font-size: .8rem; color: var(--blue); text-decoration: none; white-space: nowrap; align-self: center; }
+.link:hover { text-decoration: underline; }
+
+/* ── Buttons ── */
+button {
+  padding: 9px 18px; border: none; border-radius: 8px;
+  cursor: pointer; font-size: .875rem; font-weight: 600;
+  transition: background .15s, opacity .15s;
+}
+.btn-save   { background: var(--navy); color: #fff; }
+.btn-save:hover { background: var(--navy2); }
+.btn-refresh {
+  background: #6366f1; color: #fff;
+  padding: 10px 22px; font-size: .9rem;
+  display: flex; align-items: center; gap: 7px;
+}
+.btn-refresh:hover:not(:disabled) { filter: brightness(1.1); }
+.btn-refresh:disabled { opacity: .55; cursor: not-allowed; }
+
+/* ── Status bar ── */
+.status-bar {
+  display: none; align-items: center; gap: 10px;
+  padding: 11px 16px; border-radius: 8px;
+  margin-bottom: 16px; font-size: .875rem; font-weight: 500;
+}
+.status-bar.loading { display: flex; background: #eff6ff; color: #1d4ed8; }
+.status-bar.success { display: flex; background: #f0fdf4; color: #166534; }
+.status-bar.error   { display: flex; background: #fef2f2; color: #991b1b; }
+.spinner {
+  width: 15px; height: 15px; flex-shrink: 0;
+  border: 2.5px solid currentColor; border-top-color: transparent;
+  border-radius: 50%; animation: spin .75s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Summary ── */
+.summary {
+  background: linear-gradient(135deg, var(--navy) 0%, #0f3460 100%);
+  color: #fff; border-radius: var(--radius);
+  padding: 26px 32px;
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 18px;
+}
+.summary-label  { font-size: .8rem; opacity: .65; margin-bottom: 4px; }
+.summary-amount { font-size: 2.6rem; font-weight: 800; letter-spacing: -1px; }
+.summary-note   { font-size: .75rem; opacity: .5; margin-top: 4px; }
+.summary-stat   { text-align: right; }
+.summary-stat-num { font-size: 1.8rem; font-weight: 700; }
+
+/* ── Table ── */
+.table-card { background: var(--surface); border-radius: var(--radius); box-shadow: 0 1px 4px rgba(0,0,0,.07); overflow: hidden; }
+table { width: 100%; border-collapse: collapse; }
+thead th {
+  text-align: left; font-size: .72rem; font-weight: 700;
+  color: var(--muted); text-transform: uppercase; letter-spacing: .5px;
+  padding: 13px 16px; background: #fafafa;
+  border-bottom: 1.5px solid var(--border); white-space: nowrap;
+}
+tbody td { padding: 13px 16px; border-bottom: 1px solid #f3f4f6; font-size: .875rem; vertical-align: middle; }
+tbody tr:last-child td { border-bottom: none; }
+tbody tr:hover td { background: #f9fafb; }
+
+.ticker   { font-weight: 700; font-size: .95rem; color: var(--navy); }
+.num      { font-variant-numeric: tabular-nums; font-family: 'SF Mono','Fira Code',ui-monospace,monospace; }
+.zakat-val { font-weight: 700; color: var(--green); }
+
+.toggle { display: inline-flex; border: 1.5px solid var(--border); border-radius: 20px; overflow: hidden; }
+.toggle button {
+  padding: 4px 11px; background: transparent; border: none; border-radius: 0;
+  color: var(--muted); font-weight: 600; cursor: pointer;
+  transition: background .12s, color .12s; font-size: .78rem;
+}
+.toggle button.on-fundamental { background: var(--blue);  color: #fff; border-radius: 20px 0 0 20px; }
+.toggle button.on-active      { background: var(--amber); color: #fff; border-radius: 0 20px 20px 0; }
+
+.badge-err {
+  display: inline-block; margin-left: 6px;
+  background: #fef2f2; color: var(--red);
+  font-size: .7rem; font-weight: 600; padding: 1px 7px; border-radius: 99px;
+}
+
+.empty { text-align: center; padding: 56px 20px; color: var(--muted); }
+.empty h3 { font-size: 1rem; margin-bottom: 6px; color: #374151; }
+
+.tip { position: relative; cursor: help; border-bottom: 1px dashed var(--muted); }
+.tip::after {
+  content: attr(data-tip); display: none;
+  position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%);
+  background: #1f2937; color: #f9fafb;
+  font-size: .72rem; padding: 5px 10px; border-radius: 6px;
+  white-space: nowrap; z-index: 10; pointer-events: none;
+}
+.tip:hover::after { display: block; }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>Zakat Calculator</h1>
+    <p>CRI Method for Equity Portfolios</p>
+  </div>
+  <button class="btn-refresh" id="refreshBtn" onclick="refreshFMP()">
+    <span id="refreshBtnText">Refresh FMP Prices</span>
+  </button>
+</header>
+
+<main>
+
+  <!-- Bookmarklet setup -->
+  <div class="card bookmarklet-card" id="bookmarkletCard">
+    <div class="card-title">One-time bookmarklet setup</div>
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">1</div>
+        <div>
+          <strong>Show your bookmarks bar</strong> if hidden: <code>Cmd+Shift+B</code>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <div>
+          <strong>Copy the bookmarklet code:</strong>
+          <div class="copy-row">
+            <button class="btn-copy" id="copyBtn" onclick="copyBookmarklet()">Copy bookmarklet code</button>
+            <span class="copy-hint" id="copyHint">Click to copy</span>
+          </div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <div>
+          <strong>Create a new bookmark manually:</strong><br>
+          Right-click the bookmarks bar → <em>Add page…</em> (Chrome) or <em>New Bookmark…</em> (Safari/Firefox)<br>
+          Set the <strong>name</strong> to <code>Send to Zakat</code><br>
+          Set the <strong>URL</strong> to the code you just copied → Save
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">4</div>
+        <div>Go to <strong>Fidelity → Portfolio → Positions</strong>, then click <strong>Send to Zakat</strong> in your bookmarks bar.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings -->
+  <div class="card">
+    <div class="card-title">FMP API Settings</div>
+    <div class="settings-row">
+      <div class="form-group">
+        <label for="apiKey">Financial Modeling Prep API Key</label>
+        <input type="password" id="apiKey" placeholder="Key already saved" />
+      </div>
+      <button class="btn-save" onclick="saveSettings()">Save Key</button>
+      <a class="link" href="https://financialmodelingprep.com/developer/docs" target="_blank" rel="noopener">Get free key →</a>
+    </div>
+  </div>
+
+  <!-- Status bar -->
+  <div class="status-bar" id="statusBar">
+    <div class="spinner" id="spinner"></div>
+    <span id="statusMsg"></span>
+  </div>
+
+  <!-- Summary -->
+  <div class="summary">
+    <div>
+      <div class="summary-label">Total Zakat Due</div>
+      <div class="summary-amount" id="totalZakat">$0.00</div>
+      <div class="summary-note">2.5% of Zakatable Base across all holdings</div>
+    </div>
+    <div class="summary-stat">
+      <div class="summary-label">Portfolio Value</div>
+      <div class="summary-stat-num" id="totalMarketValue">$0.00</div>
+    </div>
+    <div class="summary-stat">
+      <div class="summary-label">Holdings</div>
+      <div class="summary-stat-num" id="holdingsCount">0</div>
+    </div>
+  </div>
+
+  <!-- Portfolio table -->
+  <div class="table-card">
+    <table>
+      <thead>
+        <tr>
+          <th>Ticker</th>
+          <th>Shares</th>
+          <th>Market Price</th>
+          <th>Market Value</th>
+          <th>Intent</th>
+          <th>CRI / Share</th>
+          <th>Zakatable Base</th>
+          <th>Zakat Due</th>
+        </tr>
+      </thead>
+      <tbody id="tableBody">
+        <tr><td colspan="8">
+          <div class="empty">
+            <h3>No positions loaded yet</h3>
+            <p>Follow the setup steps above, then click the bookmarklet on your Fidelity Positions page.</p>
+          </div>
+        </td></tr>
+      </tbody>
+    </table>
+  </div>
+
+</main>
+
+<script>
+'use strict';
+
+// ── Bookmarklet code (copied to clipboard, pasted manually as a bookmark URL) ──
+function _buildBookmarklet() {
+  return 'javascript:(function(){' +
+    'try{' +
+    // Open the app window FIRST — must be the synchronous result of the click
+    // so browsers allow it without treating it as a blocked popup.
+    'var w=window.open("http://localhost:8000/","zakat_calc");' +
+    'var SKIP=new Set(["AM","PM","USD","ETF","IRA","NAV","FZSXX","SIPC","TOT","TTL"]);' +
+    'var tickerByRow={};' +
+    'document.querySelectorAll("[col-id=\'sym\']").forEach(function(cell){' +
+      'var spans=cell.querySelectorAll("span");' +
+      'for(var i=0;i<spans.length;i++){' +
+        'var t=spans[i].textContent.trim();' +
+        'if(/^[A-Z]{1,5}$/.test(t)&&!SKIP.has(t)){' +
+          'var row=cell.closest(".ag-row");' +
+          'var idx=row&&row.getAttribute("row-index");' +
+          'if(idx!=null)tickerByRow[idx]=t;' +
+          'break;' +
+        '}' +
+      '}' +
+    '});' +
+    'var sharesByRow={};' +
+    'document.querySelectorAll("[col-id=\'qty\']").forEach(function(cell){' +
+      'var row=cell.closest(".ag-row");' +
+      'var idx=row&&row.getAttribute("row-index");' +
+      'if(idx==null)return;' +
+      'var shares=parseFloat(cell.textContent.trim().replace(/,/g,""));' +
+      'if(!isNaN(shares)&&shares>0)sharesByRow[idx]=shares;' +
+    '});' +
+    'var positions=[];' +
+    'Object.keys(tickerByRow).forEach(function(idx){' +
+      'if(sharesByRow[idx])positions.push({ticker:tickerByRow[idx],shares:sharesByRow[idx]});' +
+    '});' +
+    'if(positions.length===0){if(w)w.close();alert("No positions found. Make sure you are on the Fidelity Positions page.");return;}' +
+    'var url="http://localhost:8000/?zakat_import="+encodeURIComponent(JSON.stringify(positions));' +
+    'if(w){w.location.href=url;}else{window.open(url,"zakat_calc");}' +
+    '}catch(e){alert("Zakat bookmarklet error: "+e);}' +
+  '})();';
+}
+
+function copyBookmarklet() {
+  var code = _buildBookmarklet();
+  navigator.clipboard.writeText(code).then(function() {
+    var btn  = document.getElementById('copyBtn');
+    var hint = document.getElementById('copyHint');
+    btn.textContent = 'Copied!';
+    btn.classList.add('copied');
+    hint.textContent = 'Now right-click your bookmarks bar → Add page… → paste as the URL';
+    setTimeout(function() {
+      btn.textContent = 'Copy bookmarklet code';
+      btn.classList.remove('copied');
+      hint.textContent = 'Click to copy';
+    }, 4000);
+  }).catch(function() {
+    alert('Copy failed — please manually copy this URL:\n\n' + _buildBookmarklet());
+  });
+}
+
+let _pollTimer = null;
+let _jobId     = null;
+
+// ── Boot ─────────────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', function () {
+  loadSettings();
+
+  // Handle bookmarklet import via URL param (avoids CORS/Private Network Access issues)
+  var importParam = new URLSearchParams(window.location.search).get('zakat_import');
+  if (importParam) {
+    // Strip the param from the URL immediately so it doesn't linger
+    history.replaceState({}, '', '/');
+    importPositionsFromParam(importParam);
+  } else {
+    loadPortfolio();
+  }
+});
+
+// ── Bookmarklet URL-param import ──────────────────────────────────────────────
+async function importPositionsFromParam(json) {
+  var positions;
+  try {
+    positions = JSON.parse(json);
+  } catch (e) {
+    setStatus('error', 'Failed to parse imported positions: ' + e.message);
+    loadPortfolio();
+    return;
+  }
+
+  if (!Array.isArray(positions) || positions.length === 0) {
+    setStatus('error', 'No positions found in import data.');
+    loadPortfolio();
+    return;
+  }
+
+  setStatus('loading', 'Importing ' + positions.length + ' position(s) from Fidelity…');
+
+  try {
+    var res = await fetch('/api/positions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(positions),
+    });
+    var data = await res.json();
+    if (!res.ok) {
+      setStatus('error', data.detail || 'Failed to import positions.');
+      loadPortfolio();
+      return;
+    }
+    _jobId = data.job_id;
+    setStatus('loading', 'Fetching FMP data for ' + data.count + ' position(s)…');
+    _pollTimer = setInterval(async function () {
+      try {
+        var r = await fetch('/api/status/' + _jobId);
+        var d = await r.json();
+        handleJobStatus(d);
+      } catch { /* keep polling */ }
+    }, 1500);
+  } catch (e) {
+    setStatus('error', 'Network error during import: ' + e.message);
+    loadPortfolio();
+  }
+}
+
+// ── Settings ─────────────────────────────────────────────────────────────────
+async function loadSettings() {
+  const res  = await fetch('/api/settings');
+  const data = await res.json();
+  if (data.has_key) {
+    document.getElementById('apiKey').placeholder = 'Key saved (' + data.fmp_api_key + ')';
+  }
+}
+
+async function saveSettings() {
+  const key = document.getElementById('apiKey').value.trim();
+  if (!key) { setStatus('error', 'Please enter an API key.'); return; }
+  await fetch('/api/settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fmp_api_key: key }),
+  });
+  document.getElementById('apiKey').value = '';
+  document.getElementById('apiKey').placeholder = 'Key saved ✓';
+  setStatus('success', 'API key saved.');
+}
+
+// ── Portfolio ─────────────────────────────────────────────────────────────────
+async function loadPortfolio() {
+  const res  = await fetch('/api/portfolio');
+  const data = await res.json();
+  renderPortfolio(data);
+}
+
+function renderPortfolio({ positions, total_zakat, total_market_value }) {
+  positions          = positions          || [];
+  total_zakat        = total_zakat        || 0;
+  total_market_value = total_market_value || 0;
+
+  document.getElementById('totalZakat').textContent        = fmt$(total_zakat);
+  document.getElementById('totalMarketValue').textContent  = fmt$(total_market_value);
+  document.getElementById('holdingsCount').textContent     = positions.length;
+
+  const body = document.getElementById('tableBody');
+  if (!positions.length) {
+    body.innerHTML = '<tr><td colspan="8"><div class="empty"><h3>No positions loaded yet</h3><p>Follow the setup steps above, then click the bookmarklet on your Fidelity Positions page.</p></div></td></tr>';
+    return;
+  }
+
+  // Hide setup card once we have data
+  document.getElementById('bookmarkletCard').style.display = 'none';
+
+  body.innerHTML = positions.map(function (p) {
+    var tip = p.cri_per_share
+      ? 'Cash $' + fmtNum(p.cash_component||0) + ' + Recv $' + fmtNum(p.receivables_component||0) + ' + Inv $' + fmtNum(p.inventory_component||0) + ' \u00f7 ' + fmtNum(p.shares_outstanding||0) + ' shares'
+      : 'No CRI data';
+    var isFund = (p.intent || 'fundamental') === 'fundamental';
+    return '<tr>' +
+      '<td><span class="ticker">' + p.ticker + '</span>' + (p.error ? '<span class="badge-err" title="' + esc(p.error) + '">No FMP data</span>' : '') + '</td>' +
+      '<td class="num">' + fmtNum(p.shares) + '</td>' +
+      '<td class="num">' + fmt$(p.price||0) + '</td>' +
+      '<td class="num">' + fmt$(p.market_value||0) + '</td>' +
+      '<td><div class="toggle">' +
+        '<button class="' + (isFund ? 'on-fundamental' : '') + '" onclick="setIntent(\'' + p.ticker + '\',\'fundamental\')">Long-term</button>' +
+        '<button class="' + (!isFund ? 'on-active' : '') + '" onclick="setIntent(\'' + p.ticker + '\',\'active\')">Trading</button>' +
+      '</div></td>' +
+      '<td class="num"><span class="tip" data-tip="' + esc(tip) + '">' + fmt$(p.cri_per_share||0, 4) + '</span></td>' +
+      '<td class="num">' + fmt$(p.zakatable_base||0) + '</td>' +
+      '<td class="num zakat-val">' + fmt$(p.zakat_due||0) + '</td>' +
+    '</tr>';
+  }).join('');
+}
+
+async function setIntent(ticker, intent) {
+  await fetch('/api/intent/' + ticker, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ intent: intent }),
+  });
+  loadPortfolio();
+}
+
+// ── Refresh FMP prices (header button) ───────────────────────────────────────
+async function refreshFMP() {
+  const btn = document.getElementById('refreshBtn');
+  btn.disabled = true;
+  document.getElementById('refreshBtnText').textContent = 'Refreshing…';
+  setStatus('loading', 'Re-fetching FMP prices for existing positions…');
+
+  try {
+    const res  = await fetch('/api/update', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) {
+      setStatus('error', data.detail || 'Failed.');
+      resetRefreshBtn();
+      return;
+    }
+    _jobId = data.job_id;
+    _pollTimer = setInterval(async function () {
+      try {
+        const r = await fetch('/api/status/' + _jobId);
+        const d = await r.json();
+        handleJobStatus(d);
+      } catch { /* keep polling */ }
+    }, 1500);
+  } catch (e) {
+    setStatus('error', 'Network error: ' + e.message);
+    resetRefreshBtn();
+  }
+}
+
+function handleJobStatus(data) {
+  setStatus(
+    data.done ? (data.error ? 'error' : 'success') : 'loading',
+    data.message
+  );
+  if (data.done) {
+    clearInterval(_pollTimer);
+    _jobId = null;
+    resetRefreshBtn();
+    if (!data.error) loadPortfolio();
+  }
+}
+
+function resetRefreshBtn() {
+  const btn = document.getElementById('refreshBtn');
+  btn.disabled = false;
+  document.getElementById('refreshBtnText').textContent = 'Refresh FMP Prices';
+}
+
+// ── Status bar ────────────────────────────────────────────────────────────────
+function setStatus(type, msg) {
+  var bar     = document.getElementById('statusBar');
+  var msgEl   = document.getElementById('statusMsg');
+  var spinner = document.getElementById('spinner');
+  bar.className = 'status-bar ' + type;
+  msgEl.textContent = msg;
+  spinner.style.display = type === 'loading' ? 'block' : 'none';
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function fmt$(n, decimals) {
+  decimals = decimals || 2;
+  if (typeof n !== 'number' || isNaN(n)) return '$0.00';
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency', currency: 'USD',
+    minimumFractionDigits: decimals, maximumFractionDigits: decimals,
+  }).format(n);
+}
+function fmtNum(n) {
+  if (typeof n !== 'number' || isNaN(n)) return '0';
+  return new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(n);
+}
+function esc(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+</script>
+</body>
+</html>

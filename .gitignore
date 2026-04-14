@@ -1,0 +1,10 @@
+venv/
+__pycache__/
+*.pyc
+.env
+data/portfolio.json
+data/intents.json
+data/settings.json
+data/fmp_cache.json
+data/edgar_cik.json
+data/edgar_facts/
