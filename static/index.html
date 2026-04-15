@@ -220,9 +220,14 @@ tbody tr:hover td { background: #f9fafb; }
     <h1>Zakat Calculator</h1>
     <p>CRI Method for Equity Portfolios</p>
   </div>
-  <button class="btn-refresh" id="refreshBtn" onclick="refreshFMP()">
-    <span id="refreshBtnText">Refresh FMP Prices</span>
-  </button>
+  <div style="display:flex;gap:10px;align-items:center">
+    <button class="btn-refresh" style="background:#475569" onclick="copyBookmarklet()" id="bookmarkletBtn">
+      <span id="bookmarkletBtnText">Copy Bookmarklet</span>
+    </button>
+    <button class="btn-refresh" id="refreshBtn" onclick="refreshFMP()">
+      <span id="refreshBtnText">Refresh Prices</span>
+    </button>
+  </div>
 </header>
 
 <main>
@@ -418,27 +423,25 @@ function _buildBookmarklet() {
         'if(!isNaN(v)&&v>0)mvByRow[idx]=v;' +
       '});' +
     '});' +
-    // Capture accounts: try dedicated col-ids first
+    // Account detection: rows without a ticker symbol cell are account header rows.
+    // This avoids relying on Fidelity-specific class names or col-ids entirely.
     'var accountByRow={};' +
-    '["account","acctName","acct","accountName","accountNumber","AccountName"].forEach(function(cid){' +
-      'document.querySelectorAll("[col-id=\'"+cid+"\']").forEach(function(cell){' +
-        'var row=cell.closest(".ag-row");' +
-        'var idx=row&&row.getAttribute("row-index");' +
-        'if(idx==null||accountByRow[idx])return;' +
-        'var t=(cell.textContent||"").trim().replace(/\\s+/g," ");' +
-        'if(t)accountByRow[idx]=t;' +
-      '});' +
-    '});' +
-    // Fallback: traverse rows and carry forward the most recent group-header account name
     'var lastAcct="";' +
     'Array.from(document.querySelectorAll(".ag-row")).sort(function(a,b){' +
       'return(parseInt(a.getAttribute("row-index"))||0)-(parseInt(b.getAttribute("row-index"))||0);' +
     '}).forEach(function(row){' +
-      'var gv=row.querySelector(".ag-group-value,[col-id=\'ag-Grid-AutoColumn\'],.ag-row-group-leaf-indent+span");' +
-      'var isGroup=row.classList.contains("ag-row-group")||row.getAttribute("aria-expanded")!=null;' +
-      'if(isGroup&&gv){var gt=(gv.textContent||"").trim().replace(/\\s+/g," ");if(gt&&gt.length>2)lastAcct=gt;}' +
       'var idx=row.getAttribute("row-index");' +
-      'if(idx!=null&&!accountByRow[idx])accountByRow[idx]=lastAcct;' +
+      'var hasSymCell=!!row.querySelector("[col-id=\'sym\']");' +
+      'if(!hasSymCell){' +
+        // No ticker cell = account header row. Take the longest meaningful text from any cell.
+        'var best="";' +
+        'row.querySelectorAll(".ag-cell").forEach(function(cell){' +
+          'var t=(cell.textContent||"").trim().replace(/\\s+/g," ");' +
+          'if(t.length>best.length&&t.length>3&&!/^[\\d.,$ ]+$/.test(t))best=t;' +
+        '});' +
+        'if(best)lastAcct=best;' +
+      '}' +
+      'if(idx!=null)accountByRow[idx]=lastAcct;' +
     '});' +
     'var positions=[],pCount=0,aCount=0;' +
     'Object.keys(tickerByRow).forEach(function(idx){' +
@@ -465,15 +468,17 @@ function _buildBookmarklet() {
 function copyBookmarklet() {
   var code = _buildBookmarklet();
   navigator.clipboard.writeText(code).then(function() {
-    var btn  = document.getElementById('copyBtn');
-    var hint = document.getElementById('copyHint');
-    btn.textContent = 'Copied!';
-    btn.classList.add('copied');
-    hint.textContent = 'Now right-click your bookmarks bar → Add page… → paste as the URL';
+    // Update both the card button and the header button
+    var cardBtn  = document.getElementById('copyBtn');
+    var hdrBtn   = document.getElementById('bookmarkletBtnText');
+    var hint     = document.getElementById('copyHint');
+    if (cardBtn) { cardBtn.textContent = 'Copied!'; cardBtn.classList.add('copied'); }
+    if (hdrBtn)  { hdrBtn.textContent  = 'Copied!'; }
+    if (hint)    { hint.textContent    = 'Now right-click bookmarks bar and add as a new bookmark URL'; }
     setTimeout(function() {
-      btn.textContent = 'Copy bookmarklet code';
-      btn.classList.remove('copied');
-      hint.textContent = 'Click to copy';
+      if (cardBtn) { cardBtn.textContent = 'Copy bookmarklet code'; cardBtn.classList.remove('copied'); }
+      if (hdrBtn)  { hdrBtn.textContent  = 'Copy Bookmarklet'; }
+      if (hint)    { hint.textContent    = 'Click to copy'; }
     }, 4000);
   }).catch(function() {
     alert('Copy failed. Please manually copy this URL:\n\n' + _buildBookmarklet());
