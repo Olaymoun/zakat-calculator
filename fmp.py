@@ -745,19 +745,27 @@ async def _edgar_nport_holdings(ticker: str, client: httpx.AsyncClient) -> list:
             return []
 
         # Step 3: parse equity holdings from the matched XML
+        # Also extract valUSD and balance so we can derive price = valUSD/balance.
+        # This removes any dependency on an external price feed for sub-tickers.
         blocks = re.findall(r"<invstOrSec>(.*?)</invstOrSec>", target_xml, re.DOTALL)
         raw_holdings = []
         for block in blocks:
             cat_m = re.search(r"<assetCat>([^<]+)</assetCat>", block)
             if not cat_m or cat_m.group(1) != "EC":   # equity only
                 continue
-            name_m = re.search(r"<name>([^<]+)</name>", block)
-            pct_m  = re.search(r"<pctVal>([^<]+)</pctVal>", block)
+            name_m    = re.search(r"<name>([^<]+)</name>", block)
+            pct_m     = re.search(r"<pctVal>([^<]+)</pctVal>", block)
+            val_m     = re.search(r"<valUSD>([^<]+)</valUSD>", block)
+            balance_m = re.search(r"<balance>([^<]+)</balance>", block)
             if not name_m or not pct_m:
                 continue
+            val_usd  = float(val_m.group(1))  if val_m     else 0.0
+            balance  = float(balance_m.group(1)) if balance_m else 0.0
+            price    = round(val_usd / balance, 4) if balance > 0 else 0.0
             raw_holdings.append({
-                "name": name_m.group(1).strip(),
-                "pct":  float(pct_m.group(1)),
+                "name":  name_m.group(1).strip(),
+                "pct":   float(pct_m.group(1)),
+                "price": price,
             })
 
         logger.info("N-PORT for %s: %d equity holdings found", ticker, len(raw_holdings))
@@ -777,7 +785,10 @@ async def _edgar_nport_holdings(ticker: str, client: httpx.AsyncClient) -> list:
                     if symbol:
                         break
             if symbol:
-                results.append({"asset": symbol, "weightPercentage": h["pct"]})
+                entry: dict = {"asset": symbol, "weightPercentage": h["pct"]}
+                if h.get("price"):
+                    entry["nport_price"] = h["price"]   # price derived from N-PORT valUSD/balance
+                results.append(entry)
             else:
                 unmatched.append(h["name"])
 
@@ -846,7 +857,14 @@ async def _compute_etf_cri(
 
     holdings = cache["etf_holdings"].get(ticker, {}).get("data", [])
     if not holdings:
-        return None   # not an ETF or holdings data unavailable
+        # etf_holdings cache is empty but N-PORT may already have data
+        # (e.g. fetched in a previous manual test or earlier session)
+        nport_fallback = await _edgar_nport_holdings(ticker, client)
+        if nport_fallback:
+            holdings = nport_fallback
+            cache["etf_holdings"][ticker] = {"data": holdings, "fetched_at": now}
+        else:
+            return None   # not an ETF or no holdings data available from any source
 
     # ── 2. Top N holdings by weight ───────────────────────────────────────────
     top_h = sorted(holdings, key=lambda h: h.get("weightPercentage", 0), reverse=True)
@@ -858,7 +876,12 @@ async def _compute_etf_cri(
     logger.info("ETF %s: enriching top-%d holdings for CRI: %s", ticker, len(sub_tickers), sub_tickers)
 
     # ── 3. Enrich sub-tickers using the shared cache ──────────────────────────
-    # Quotes (try /quote then /profile as fallback, same as main enrichment)
+    # Build a map of nport_price for each sub-ticker (price derived from N-PORT
+    # valUSD/balance) to use when no live price is available.
+    nport_prices = {h["asset"]: h["nport_price"]
+                    for h in top_h if h.get("nport_price", 0) > 0}
+
+    # Quotes: use cached price first, then FMP, then N-PORT-derived price as last resort
     sub_quotes: dict = {}
     for st in sub_tickers:
         cached_p = cache["prices"].get(st, {})
@@ -874,6 +897,9 @@ async def _compute_etf_cri(
             if item and item.get("price"):
                 sub_quotes[st] = {"price": item["price"]}
                 cache["prices"][st] = {"price": item["price"], "fetched_at": now}
+            elif nport_prices.get(st):
+                # Use price derived from N-PORT valUSD/balance (quarterly, not live)
+                sub_quotes[st] = {"price": nport_prices[st]}
 
     # Shares float
     stale_float = [t for t in sub_tickers
