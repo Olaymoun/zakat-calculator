@@ -175,6 +175,15 @@ tbody tr:hover td { background: #f9fafb; }
 
 .ticker      { font-weight: 700; font-size: .95rem; color: var(--navy); }
 .muted-cell  { font-size: .8rem; color: var(--muted); max-width: 160px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.account-section { margin-bottom: 24px; }
+.account-heading {
+  font-size: .8rem; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .5px; color: var(--muted);
+  padding: 0 4px 8px; margin-bottom: 0;
+}
+.account-subline {
+  font-size: .75rem; color: var(--muted); padding: 0 4px 10px;
+}
 .num      { font-variant-numeric: tabular-nums; font-family: 'SF Mono','Fira Code',ui-monospace,monospace; }
 .zakat-val { font-weight: 700; color: var(--green); }
 
@@ -339,31 +348,32 @@ tbody tr:hover td { background: #f9fafb; }
     </div>
   </div>
 
-  <!-- Portfolio table -->
-  <div class="table-card">
-    <table>
-      <thead>
-        <tr>
-          <th>Ticker</th>
-          <th>Account</th>
-          <th>Shares</th>
-          <th>Market Price</th>
-          <th>Market Value</th>
-          <th>Intent</th>
-          <th>CRI / Share</th>
-          <th>Zakatable Base</th>
-          <th>Zakat Due</th>
-        </tr>
-      </thead>
-      <tbody id="tableBody">
-        <tr><td colspan="9">
-          <div class="empty">
-            <h3>No positions loaded yet</h3>
-            <p>Follow the setup steps above, then click the bookmarklet on your Fidelity Positions page.</p>
-          </div>
-        </td></tr>
-      </tbody>
-    </table>
+  <!-- Portfolio tables (one per account, rendered by JS) -->
+  <div id="portfolioTables">
+    <div class="table-card">
+      <table>
+        <thead>
+          <tr>
+            <th>Ticker</th>
+            <th>Shares</th>
+            <th>Market Price</th>
+            <th>Market Value</th>
+            <th>Intent</th>
+            <th>CRI / Share</th>
+            <th>Zakatable Base</th>
+            <th>Zakat Due</th>
+          </tr>
+        </thead>
+        <tbody id="tableBody">
+          <tr><td colspan="8">
+            <div class="empty">
+              <h3>No positions loaded yet</h3>
+              <p>Follow the setup steps above, then click the bookmarklet on your Fidelity Positions page.</p>
+            </div>
+          </td></tr>
+        </tbody>
+      </table>
+    </div>
   </div>
 
 </main>
@@ -423,42 +433,19 @@ function _buildBookmarklet() {
         'if(!isNaN(v)&&v>0)mvByRow[idx]=v;' +
       '});' +
     '});' +
-    // Account detection: rows without a ticker symbol cell are account header rows.
-    // This avoids relying on Fidelity-specific class names or col-ids entirely.
-    'var accountByRow={};' +
-    'var lastAcct="";' +
-    'Array.from(document.querySelectorAll(".ag-row")).sort(function(a,b){' +
-      'return(parseInt(a.getAttribute("row-index"))||0)-(parseInt(b.getAttribute("row-index"))||0);' +
-    '}).forEach(function(row){' +
-      'var idx=row.getAttribute("row-index");' +
-      'var hasSymCell=!!row.querySelector("[col-id=\'sym\']");' +
-      'if(!hasSymCell){' +
-        // No ticker cell = account header row. Take the longest meaningful text from any cell.
-        'var best="";' +
-        'row.querySelectorAll(".ag-cell").forEach(function(cell){' +
-          'var t=(cell.textContent||"").trim().replace(/\\s+/g," ");' +
-          'if(t.length>best.length&&t.length>3&&!/^[\\d.,$ ]+$/.test(t))best=t;' +
-        '});' +
-        'if(best)lastAcct=best;' +
-      '}' +
-      'if(idx!=null)accountByRow[idx]=lastAcct;' +
-    '});' +
-    'var positions=[],pCount=0,aCount=0;' +
+    // Prompt for account name - simpler and 100% reliable vs trying to parse Fidelity DOM
+    'var importAcct=(prompt("Which Fidelity account are you importing?\\nExamples: Individual, Roth IRA, 401k, Joint\\n\\nEnter account name:")||"").trim();' +
+    'var positions=[],pCount=0;' +
     'Object.keys(tickerByRow).forEach(function(idx){' +
       'if(!sharesByRow[idx])return;' +
       'var shares=sharesByRow[idx];' +
       'var price=priceByRow[idx]||0;' +
       'if(!price&&mvByRow[idx]&&shares>0){price=mvByRow[idx]/shares;}' +
-      'var acct=accountByRow[idx]||"";' +
       'if(price>0)pCount++;' +
-      'if(acct)aCount++;' +
-      'positions.push({ticker:tickerByRow[idx],shares:shares,price:price,account:acct});' +
+      'positions.push({ticker:tickerByRow[idx],shares:shares,price:price,account:importAcct});' +
     '});' +
-    'try{console.log("[zakat] captured",positions.length,"positions; prices:",pCount,"accounts:",aCount,positions);}catch(_){}' +
+    'try{console.log("[zakat] captured",positions.length,"positions, prices:",pCount,"account:",importAcct||"(none)",positions);}catch(_){}' +
     'if(positions.length===0){if(w)w.close();alert("No positions found. Make sure you are on the Fidelity Positions page.");return;}' +
-    'if(pCount<positions.length||aCount<positions.length){' +
-      'try{console.warn("[zakat] partial capture: prices",pCount+"/"+positions.length,"accounts",aCount+"/"+positions.length);}catch(_){}' +
-    '}' +
     'var url="http://localhost:8000/?zakat_import="+encodeURIComponent(JSON.stringify(positions));' +
     'if(w){w.location.href=url;}else{window.open(url,"zakat_calc");}' +
     '}catch(e){alert("Zakat bookmarklet error: "+e);}' +
@@ -590,21 +577,38 @@ function renderPortfolio({ positions, total_zakat, total_market_value, total_cas
   document.getElementById('totalCashZakat').textContent    = fmt$(total_cash_zakat);
   document.getElementById('holdingsCount').textContent     = positions.length;
 
-  const body = document.getElementById('tableBody');
+  var container = document.getElementById('portfolioTables');
+
   if (!positions.length) {
-    body.innerHTML = '<tr><td colspan="9"><div class="empty"><h3>No positions loaded yet</h3><p>Follow the setup steps above, then click the bookmarklet on your Fidelity Positions page.</p></div></td></tr>';
+    container.innerHTML = '<div class="table-card"><table><thead><tr>' +
+      '<th>Ticker</th><th>Shares</th><th>Market Price</th><th>Market Value</th>' +
+      '<th>Intent</th><th>CRI / Share</th><th>Zakatable Base</th><th>Zakat Due</th>' +
+      '</tr></thead><tbody><tr><td colspan="8"><div class="empty">' +
+      '<h3>No positions loaded yet</h3>' +
+      '<p>Follow the setup steps above, then click the bookmarklet on your Fidelity Positions page.</p>' +
+      '</div></td></tr></tbody></table></div>';
     return;
   }
 
   // Hide setup card once we have data
   document.getElementById('bookmarkletCard').style.display = 'none';
 
-  body.innerHTML = positions.map(function (p) {
+  // Group positions by account
+  var accounts = [];
+  var byAccount = {};
+  positions.forEach(function(p) {
+    var acct = p.account || 'All Holdings';
+    if (!byAccount[acct]) { byAccount[acct] = []; accounts.push(acct); }
+    byAccount[acct].push(p);
+  });
+
+  function rowHtml(p) {
     var tip;
     if (p.is_etf_estimated) {
       tip = 'ETF: CRI estimated from top holdings (weighted avg)';
     } else if (p.cri_per_share) {
-      tip = 'Cash $' + fmtNum(p.cash_component||0) + ' + Recv $' + fmtNum(p.receivables_component||0) + ' + Inv $' + fmtNum(p.inventory_component||0) + ' / ' + fmtNum(p.shares_outstanding||0) + ' shares';
+      tip = 'Cash $' + fmtNum(p.cash_component||0) + ' + Recv $' + fmtNum(p.receivables_component||0) +
+            ' + Inv $' + fmtNum(p.inventory_component||0) + ' / ' + fmtNum(p.shares_outstanding||0) + ' shares';
     } else {
       tip = 'No CRI data';
     }
@@ -613,12 +617,11 @@ function renderPortfolio({ positions, total_zakat, total_market_value, total_cas
     if (p.is_etf_estimated) {
       badges += '<span class="badge-etf" title="CRI estimated from ETF holdings">ETF est.</span>';
     } else if (p.is_etf) {
-      badges += '<span class="badge-etf" style="background:#fff7ed;color:#c2410c" title="ETF: CRI data unavailable on current FMP plan. Switch to Short-Term intent to use full market value.">ETF: use Short-Term</span>';
+      badges += '<span class="badge-etf" style="background:#fff7ed;color:#c2410c" title="ETF: CRI data unavailable. Switch to Short-Term intent to use full market value.">ETF</span>';
     }
     if (p.error) badges += '<span class="badge-err" title="' + esc(p.error) + '">No data</span>';
     return '<tr>' +
       '<td><span class="ticker">' + esc(p.ticker) + '</span>' + badges + '</td>' +
-      '<td class="muted-cell">' + esc(p.account || '') + '</td>' +
       '<td class="num">' + fmtNum(p.shares) + '</td>' +
       '<td class="num">' + fmt$(p.price||0) + '</td>' +
       '<td class="num">' + fmt$(p.market_value||0) + '</td>' +
@@ -630,6 +633,23 @@ function renderPortfolio({ positions, total_zakat, total_market_value, total_cas
       '<td class="num">' + fmt$(p.zakatable_base||0) + '</td>' +
       '<td class="num zakat-val">' + fmt$(p.zakat_due||0) + '</td>' +
     '</tr>';
+  }
+
+  container.innerHTML = accounts.map(function(acct) {
+    var rows = byAccount[acct];
+    var acctZakat = rows.reduce(function(s, p) { return s + (p.zakat_due||0); }, 0);
+    var acctValue = rows.reduce(function(s, p) { return s + (p.market_value||0); }, 0);
+    return '<div class="account-section">' +
+      '<div class="account-heading">' + esc(acct) + '</div>' +
+      '<div class="account-subline">Market Value: ' + fmt$(acctValue) + ' &nbsp;|&nbsp; Zakat Due: ' + fmt$(acctZakat) + '</div>' +
+      '<div class="table-card"><table>' +
+      '<thead><tr>' +
+        '<th>Ticker</th><th>Shares</th><th>Market Price</th><th>Market Value</th>' +
+        '<th>Intent</th><th>CRI / Share</th><th>Zakatable Base</th><th>Zakat Due</th>' +
+      '</tr></thead>' +
+      '<tbody>' + rows.map(rowHtml).join('') + '</tbody>' +
+      '</table></div>' +
+    '</div>';
   }).join('');
 }
 

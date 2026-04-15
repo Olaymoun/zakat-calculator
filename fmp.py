@@ -1,12 +1,15 @@
 """
 FMP API client - uses /stable/ endpoints (required for this API key tier).
 SEC EDGAR is used as a free fallback for balance-sheet data when FMP returns 402.
+Yahoo Finance quoteSummary is used as a third fallback for balance sheets,
+shares outstanding, and ETF holdings.
 
 Call budget per update run (N tickers):
   N FMP quote calls                         (price, always fresh)
   0–N FMP shares-float calls                (cached 7 days)
   0–N FMP balance-sheet calls               (cached 90 days)
-  0–N SEC EDGAR company-concept calls ×4    (only for tickers FMP can't serve)
+  0–N SEC EDGAR company-concept calls x4    (only for tickers FMP cannot serve)
+  0–N Yahoo Finance quoteSummary calls      (fallback for EDGAR misses and ETF holdings)
 """
 
 import json
@@ -29,6 +32,11 @@ PRICE_TTL_DAYS        = 1    # cache prices for 1 day (fallback when FMP is rate
 ETF_HOLDINGS_TTL_DAYS = 7    # ETF holdings rebalance infrequently
 ETF_MISS_TTL_DAYS     = 1    # retry failed ETF holdings lookups after 1 day
 ETF_TOP_N             = 10   # enrich top-N holdings for CRI estimation
+
+# Yahoo Finance free quoteSummary API (no key required)
+YAHOO_BASE    = "https://query1.finance.yahoo.com/v10/finance/quoteSummary"
+YAHOO_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; ZakatCalculator/1.0)"}
+YAHOO_TTL_DAYS = 1
 
 # Hardcoded set of common ETF tickers. Used so we only flag real ETFs when
 # FMP's profile endpoint (which carries the authoritative isEtf flag) is not
@@ -176,6 +184,35 @@ async def enrich_positions(tickers: list, api_key: str) -> dict:
                 if edgar_bs:
                     logger.info("Got EDGAR balance sheet for %s", ticker)
                     cache["balance_sheets"][ticker] = {"data": edgar_bs, "fetched_at": now}
+
+        # ── Yahoo Finance fallback for balance sheets EDGAR could not serve ──────
+        # Covers international stocks (e.g. CCJ) and any other EDGAR misses.
+        no_bs_yahoo = [t for t in tickers if not cache["balance_sheets"].get(t, {}).get("data")]
+        if no_bs_yahoo:
+            logger.info("Trying Yahoo Finance for %d ticker(s) with no balance sheet: %s",
+                        len(no_bs_yahoo), no_bs_yahoo)
+            for ticker in no_bs_yahoo:
+                ybs = await _yahoo_balance_sheet(ticker, client)
+                if ybs:
+                    logger.info("Got Yahoo Finance balance sheet for %s", ticker)
+                    cache["balance_sheets"][ticker] = {"data": ybs, "fetched_at": now}
+
+        # ── Yahoo Finance shares supplement for tickers with BS but no shares ───
+        # Happens when EDGAR has cash/receivables but its CSO concept returned 0.
+        missing_shares = [
+            t for t in tickers
+            if cache["balance_sheets"].get(t, {}).get("data")
+            and cache["balance_sheets"][t]["data"].get("commonStockSharesOutstanding") is None
+            and not (cache["shares_float"].get(t, {}).get("data") or {}).get("outstandingShares")
+        ]
+        if missing_shares:
+            logger.info("Fetching shares from Yahoo Finance for %d ticker(s): %s",
+                        len(missing_shares), missing_shares)
+            for ticker in missing_shares:
+                shares = await _yahoo_shares(ticker, client)
+                if shares:
+                    logger.info("Got %d shares for %s from Yahoo Finance", shares, ticker)
+                    cache["balance_sheets"][ticker]["data"]["commonStockSharesOutstanding"] = shares
 
         # ── ETF CRI estimation for tickers still without balance sheet ─────────
         # ETFs have no meaningful balance sheet of their own.  Instead, fetch the
@@ -414,6 +451,87 @@ async def _get_edgar(client: httpx.AsyncClient, url: str, headers: dict):
         return None
 
 
+# ─── Yahoo Finance helpers ────────────────────────────────────────────────────
+
+async def _yahoo_get(client: httpx.AsyncClient, ticker: str, modules: str) -> dict:
+    """Fetch Yahoo Finance quoteSummary. Returns result[0] dict or {} on failure."""
+    try:
+        resp = await client.get(
+            f"{YAHOO_BASE}/{ticker}",
+            params={"modules": modules},
+            headers=YAHOO_HEADERS,
+            timeout=15.0,
+        )
+        if resp.status_code != 200:
+            logger.debug("Yahoo Finance %d for %s (%s)", resp.status_code, ticker, modules)
+            return {}
+        data = resp.json()
+        results = (data.get("quoteSummary") or {}).get("result") or []
+        return results[0] if results else {}
+    except Exception as exc:
+        logger.debug("Yahoo Finance fetch failed for %s: %s", ticker, exc)
+        return {}
+
+
+def _yraw(obj) -> float:
+    """Extract the raw numeric value from a Yahoo Finance {raw, fmt} object."""
+    if isinstance(obj, dict):
+        return obj.get("raw") or 0
+    return obj or 0
+
+
+async def _yahoo_balance_sheet(ticker: str, client: httpx.AsyncClient) -> dict:
+    """
+    Fetch balance sheet and shares outstanding from Yahoo Finance.
+    Returns a dict compatible with _compute_cri, or {} on failure.
+    Works for US and international tickers (e.g. CCJ).
+    """
+    data = await _yahoo_get(client, ticker, "balanceSheetHistory,defaultKeyStatistics")
+
+    bs_list = (data.get("balanceSheetHistory") or {}).get("balanceSheetStatements") or []
+    bs      = bs_list[0] if bs_list else {}
+    stats   = data.get("defaultKeyStatistics") or {}
+
+    cash        = _yraw(bs.get("cash")) + _yraw(bs.get("shortTermInvestments"))
+    receivables = _yraw(bs.get("netReceivables"))
+    inventory   = _yraw(bs.get("inventory"))
+    shares      = _yraw(stats.get("sharesOutstanding"))
+
+    if not cash and not receivables and not inventory:
+        return {}
+
+    return {
+        "cashAndShortTermInvestments": cash,
+        "netReceivables":              receivables,
+        "inventory":                   inventory,
+        "commonStockSharesOutstanding": int(shares) if shares else None,
+        "source":                      "yahoo",
+    }
+
+
+async def _yahoo_etf_holdings(ticker: str, client: httpx.AsyncClient) -> list:
+    """
+    Return [{asset, weightPercentage}, ...] from Yahoo Finance topHoldings.
+    weightPercentage is in the 0-100 range.
+    """
+    data = await _yahoo_get(client, ticker, "topHoldings")
+    holdings = (data.get("topHoldings") or {}).get("holdings") or []
+    result = []
+    for h in holdings:
+        symbol = h.get("symbol", "").upper()
+        pct    = _yraw(h.get("holdingPercent")) * 100   # Yahoo uses 0-1 scale
+        if symbol and pct > 0:
+            result.append({"asset": symbol, "weightPercentage": pct})
+    return result
+
+
+async def _yahoo_shares(ticker: str, client: httpx.AsyncClient) -> Optional[int]:
+    """Return shares outstanding for a ticker from Yahoo Finance, or None."""
+    data   = await _yahoo_get(client, ticker, "defaultKeyStatistics")
+    shares = _yraw((data.get("defaultKeyStatistics") or {}).get("sharesOutstanding"))
+    return int(shares) if shares else None
+
+
 # ─── ETF CRI estimation ───────────────────────────────────────────────────────
 
 async def _compute_etf_cri(
@@ -448,6 +566,11 @@ async def _compute_etf_cri(
         if not (isinstance(raw, list) and raw):
             raw = await _get(client, f"{FMP_BASE}/etf-holdings",
                              {"symbol": ticker, "apikey": api_key})
+        if not (isinstance(raw, list) and raw):
+            # FMP endpoints unavailable on this plan; try Yahoo Finance topHoldings
+            yahoo_h = await _yahoo_etf_holdings(ticker, client)
+            if yahoo_h:
+                raw = yahoo_h
         if isinstance(raw, list) and raw:
             cache["etf_holdings"][ticker] = {"data": raw, "fetched_at": now}
         else:
