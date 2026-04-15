@@ -14,6 +14,8 @@ Call budget per update run (N tickers):
 
 import json
 import logging
+import re
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -34,9 +36,36 @@ ETF_MISS_TTL_DAYS     = 1    # retry failed ETF holdings lookups after 1 day
 ETF_TOP_N             = 10   # enrich top-N holdings for CRI estimation
 
 # Yahoo Finance free quoteSummary API (no key required)
-YAHOO_BASE    = "https://query1.finance.yahoo.com/v10/finance/quoteSummary"
-YAHOO_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; ZakatCalculator/1.0)"}
+YAHOO_BASE     = "https://query1.finance.yahoo.com/v10/finance/quoteSummary"
+YAHOO_HEADERS  = {"User-Agent": "Mozilla/5.0 (compatible; ZakatCalculator/1.0)"}
 YAHOO_TTL_DAYS = 1
+
+# EDGAR N-PORT: free quarterly ETF holdings filings from the SEC
+EDGAR_EFTS_SEARCH  = "https://efts.sec.gov/LATEST/search-index"
+EDGAR_NPORT_CACHE  = Path(__file__).parent / "data" / "edgar_nport.json"
+EDGAR_NPORT_TTL    = 30   # N-PORT is quarterly; cache 30 days
+EDGAR_NAME_CACHE   = Path(__file__).parent / "data" / "edgar_name_ticker.json"
+EDGAR_NAME_TTL     = 90
+
+# Maps ETF ticker to (trust_cik, series_name_phrase) for direct EDGAR N-PORT lookup.
+# Using the trust CIK avoids false positives from EDGAR full-text search (which returns
+# any filing that mentions the ETF name, not just the ETF's own N-PORT).
+_ETF_EDGAR_INFO: dict = {
+    # SELECT SECTOR SPDR TRUST (CIK 1064641) - 11 series
+    "XLK":  ("1064641", "Technology Select Sector"),
+    "XLF":  ("1064641", "Financial Select Sector"),
+    "XLE":  ("1064641", "Energy Select Sector"),
+    "XLV":  ("1064641", "Health Care Select Sector"),
+    "XLI":  ("1064641", "Industrial Select Sector"),
+    "XLP":  ("1064641", "Consumer Staples Select Sector"),
+    "XLU":  ("1064641", "Utilities Select Sector"),
+    "XLY":  ("1064641", "Consumer Discretionary Select Sector"),
+    "XLB":  ("1064641", "Materials Select Sector"),
+    "XLC":  ("1064641", "Communication Services Select Sector"),
+    "XLRE": ("1064641", "Real Estate Select Sector"),
+    # Add more trusts/funds here as needed:
+    # "SPY":  ("1222333", "SPDR S&P 500"),
+}
 
 # Hardcoded set of common ETF tickers. Used so we only flag real ETFs when
 # FMP's profile endpoint (which carries the authoritative isEtf flag) is not
@@ -206,12 +235,19 @@ async def enrich_positions(tickers: list, api_key: str) -> dict:
             and not (cache["shares_float"].get(t, {}).get("data") or {}).get("outstandingShares")
         ]
         if missing_shares:
-            logger.info("Fetching shares from Yahoo Finance for %d ticker(s): %s",
+            logger.info("Fetching shares for %d ticker(s) with missing share count: %s",
                         len(missing_shares), missing_shares)
+            # Build reverse cik map for lookup
+            cik_map = {t: cik for t, cik in (await _edgar_cik_map(client)).items()}
             for ticker in missing_shares:
                 shares = await _yahoo_shares(ticker, client)
+                if not shares:
+                    # Yahoo unavailable; parse R1.htm from the most recent EDGAR filing
+                    cik = cik_map.get(ticker.upper())
+                    if cik:
+                        shares = await _edgar_shares_from_filing(cik, client)
                 if shares:
-                    logger.info("Got %d shares for %s from Yahoo Finance", shares, ticker)
+                    logger.info("Got %d shares for %s", shares, ticker)
                     cache["balance_sheets"][ticker]["data"]["commonStockSharesOutstanding"] = shares
 
         # ── ETF CRI estimation for tickers still without balance sheet ─────────
@@ -451,6 +487,65 @@ async def _get_edgar(client: httpx.AsyncClient, url: str, headers: dict):
         return None
 
 
+# ─── EDGAR filing-level shares fallback ──────────────────────────────────────
+
+async def _edgar_shares_from_filing(cik: str, client: httpx.AsyncClient) -> Optional[int]:
+    """
+    Parse EntityCommonStockSharesOutstanding from EDGAR's R1.htm viewer file
+    of the most recent 10-Q or 10-K.  Used when the company-concept API returns
+    stale or no shares data (e.g. Visa, which files shares only in the cover page
+    but not in the tagged us-gaap CommonStockSharesOutstanding concept).
+    """
+    headers = {"User-Agent": EDGAR_USER_AGENT}
+    try:
+        # Get most recent 10-Q or 10-K accession
+        sub_resp = await client.get(
+            f"https://data.sec.gov/submissions/CIK{cik}.json",
+            headers=headers, timeout=15.0,
+        )
+        sub  = sub_resp.json()
+        recent = sub.get("filings", {}).get("recent", {})
+        forms = recent.get("form", [])
+        accs  = recent.get("accessionNumber", [])
+        filing_acc = next(
+            (accs[i] for i, f in enumerate(forms) if f in ("10-Q", "10-K")), None
+        )
+        if not filing_acc:
+            return None
+
+        cik_plain = cik.lstrip("0")
+        acc_nodash = filing_acc.replace("-", "")
+        r1_url = (f"https://www.sec.gov/Archives/edgar/data/"
+                  f"{cik_plain}/{acc_nodash}/R1.htm")
+        resp   = await client.get(r1_url, headers=headers, timeout=15.0)
+        if resp.status_code != 200:
+            return None
+
+        # Parse the tagged share count out of the XBRL viewer table.
+        # The R1.htm structure puts the number in a class="nump" cell that
+        # follows the concept anchor: EntityCommonStockSharesOutstanding -> ... -> nump cell
+        match = re.search(
+            r"EntityCommonStockSharesOutstanding[^>]+>[^<]+</a></td>"
+            r".*?<td[^>]*nump[^>]*>([\d,]+)<",
+            resp.text, re.IGNORECASE | re.DOTALL,
+        )
+        if not match:
+            # Broader fallback for non-standard layouts
+            match = re.search(
+                r"Shares\s+Outstanding[^<]*</a></td>"
+                r".*?<td[^>]*nump[^>]*>([\d,]+)<",
+                resp.text, re.IGNORECASE | re.DOTALL,
+            )
+        if match:
+            shares = int(match.group(1).replace(",", ""))
+            if shares > 1_000_000:   # sanity: must be at least 1M shares
+                logger.info("Got %d shares for CIK %s from R1.htm", shares, cik)
+                return shares
+    except Exception as exc:
+        logger.debug("R1.htm shares fetch failed for CIK %s: %s", cik, exc)
+    return None
+
+
 # ─── Yahoo Finance helpers ────────────────────────────────────────────────────
 
 async def _yahoo_get(client: httpx.AsyncClient, ticker: str, modules: str) -> dict:
@@ -532,6 +627,174 @@ async def _yahoo_shares(ticker: str, client: httpx.AsyncClient) -> Optional[int]
     return int(shares) if shares else None
 
 
+# ─── EDGAR N-PORT ETF holdings ────────────────────────────────────────────────
+
+def _normalize_company_name(name: str) -> str:
+    """Strip legal suffixes and whitespace for fuzzy company-name matching."""
+    stop = (r"\b(incorporated|inc|corporation|corp|limited|ltd|company|co|plc|llc|lp|"
+            r"trust|group|holdings|international|technologies|technology|systems|"
+            r"solutions|communications|enterprises|industries|services|global|"
+            r"semiconductor|pharmaceuticals|pharmaceutical|therapeutics|biosciences|"
+            r"financial|bancorporation|bancshares|bancorp)\b")
+    n = re.sub(stop, "", name.lower(), flags=re.IGNORECASE)
+    n = re.sub(r"[^a-z0-9 ]", " ", n)
+    return re.sub(r"\s+", " ", n).strip()
+
+
+async def _edgar_name_ticker_map(client: httpx.AsyncClient) -> dict:
+    """
+    Build normalized company-name -> ticker lookup from SEC company_tickers.json.
+    Cached locally for EDGAR_NAME_TTL days.
+    """
+    if EDGAR_NAME_CACHE.exists():
+        try:
+            cached = json.loads(EDGAR_NAME_CACHE.read_text())
+            if not _is_stale(cached.get("_fetched"), EDGAR_NAME_TTL):
+                return cached
+        except Exception:
+            pass
+    try:
+        resp = await client.get(
+            EDGAR_TICKERS, headers={"User-Agent": EDGAR_USER_AGENT}, timeout=30.0
+        )
+        raw = resp.json()
+        mapping: dict = {"_fetched": _now_iso()}
+        for entry in raw.values():
+            t     = str(entry.get("ticker", "")).upper().strip()
+            title = str(entry.get("title", "")).strip()
+            if t and title:
+                norm = _normalize_company_name(title)
+                if norm:
+                    mapping[norm] = t
+        EDGAR_NAME_CACHE.write_text(json.dumps(mapping))
+        logger.info("Built EDGAR name->ticker map with %d entries", len(mapping) - 1)
+        return mapping
+    except Exception as exc:
+        logger.warning("EDGAR name->ticker map failed: %s", exc)
+        return {}
+
+
+async def _edgar_nport_holdings(ticker: str, client: httpx.AsyncClient) -> list:
+    """
+    Fetch ETF holdings from SEC EDGAR N-PORT-P filing (free, no key required).
+    Returns [{asset: ticker, weightPercentage: float}, ...] or [].
+
+    Uses trust CIK from _ETF_EDGAR_INFO to avoid false positives from EDGAR
+    full-text search (which returns any fund that holds the ETF, not the ETF itself).
+    Scans the trust's recent N-PORT filings to find the right series by name.
+    """
+    info = _ETF_EDGAR_INFO.get(ticker.upper())
+    if not info:
+        return []
+    trust_cik, series_phrase = info
+
+    # Load N-PORT cache
+    nport_cache: dict = {}
+    if EDGAR_NPORT_CACHE.exists():
+        try:
+            nport_cache = json.loads(EDGAR_NPORT_CACHE.read_text())
+        except Exception:
+            pass
+
+    cached = nport_cache.get(ticker, {})
+    if cached.get("holdings") and not _is_stale(cached.get("fetched_at"), EDGAR_NPORT_TTL):
+        logger.info("Using cached N-PORT holdings for %s (%d entries)",
+                    ticker, len(cached["holdings"]))
+        return cached["holdings"]
+
+    headers = {"User-Agent": EDGAR_USER_AGENT}
+    cik_padded = trust_cik.zfill(10)
+
+    try:
+        # Step 1: get recent N-PORT accession numbers for this trust
+        resp_sub = await client.get(
+            f"https://data.sec.gov/submissions/CIK{cik_padded}.json",
+            headers=headers, timeout=15.0,
+        )
+        sub  = resp_sub.json()
+        filings  = sub.get("filings", {}).get("recent", {})
+        all_forms = filings.get("form", [])
+        all_accs  = filings.get("accessionNumber", [])
+        nport_accs = [all_accs[i] for i, f in enumerate(all_forms) if f == "NPORT-P"]
+
+        if not nport_accs:
+            logger.warning("No N-PORT filings found for trust CIK %s", trust_cik)
+            return []
+
+        # Step 2: scan filings (most recent first) to find the right series
+        cik_plain = trust_cik.lstrip("0")
+        target_xml = None
+        for acc in nport_accs[:30]:   # check up to 30 filings (trust may have many series)
+            acc_clean = acc.replace("-", "")
+            xml_url   = (f"https://www.sec.gov/Archives/edgar/data/"
+                         f"{cik_plain}/{acc_clean}/primary_doc.xml")
+            try:
+                resp_x = await client.get(xml_url, headers=headers, timeout=15.0)
+                xml    = resp_x.text
+                series_names = re.findall(r"<seriesName>([^<]+)</seriesName>", xml)
+                if any(series_phrase.lower() in s.lower() for s in series_names):
+                    logger.info("Found N-PORT for %s: %s (series: %s)",
+                                ticker, acc, series_names)
+                    target_xml = xml
+                    break
+            except Exception:
+                continue
+
+        if not target_xml:
+            logger.warning("Could not find N-PORT series '%s' for %s", series_phrase, ticker)
+            return []
+
+        # Step 3: parse equity holdings from the matched XML
+        blocks = re.findall(r"<invstOrSec>(.*?)</invstOrSec>", target_xml, re.DOTALL)
+        raw_holdings = []
+        for block in blocks:
+            cat_m = re.search(r"<assetCat>([^<]+)</assetCat>", block)
+            if not cat_m or cat_m.group(1) != "EC":   # equity only
+                continue
+            name_m = re.search(r"<name>([^<]+)</name>", block)
+            pct_m  = re.search(r"<pctVal>([^<]+)</pctVal>", block)
+            if not name_m or not pct_m:
+                continue
+            raw_holdings.append({
+                "name": name_m.group(1).strip(),
+                "pct":  float(pct_m.group(1)),
+            })
+
+        logger.info("N-PORT for %s: %d equity holdings found", ticker, len(raw_holdings))
+
+        # Step 4: map company names to tickers using EDGAR company_tickers.json
+        name_map  = await _edgar_name_ticker_map(client)
+        results   = []
+        unmatched = []
+        for h in raw_holdings:
+            norm   = _normalize_company_name(h["name"])
+            symbol = name_map.get(norm)
+            if not symbol:
+                # Try progressively shorter prefixes
+                parts = norm.split()
+                for n_words in range(len(parts) - 1, 0, -1):
+                    symbol = name_map.get(" ".join(parts[:n_words]))
+                    if symbol:
+                        break
+            if symbol:
+                results.append({"asset": symbol, "weightPercentage": h["pct"]})
+            else:
+                unmatched.append(h["name"])
+
+        if unmatched:
+            logger.debug("N-PORT %s: %d unmatched: %s", ticker, len(unmatched), unmatched[:5])
+        logger.info("N-PORT %s: mapped %d/%d holdings", ticker, len(results), len(raw_holdings))
+
+        # Cache and return
+        nport_cache[ticker] = {"holdings": results, "fetched_at": _now_iso()}
+        EDGAR_NPORT_CACHE.write_text(json.dumps(nport_cache, indent=2))
+        return results
+
+    except Exception as exc:
+        logger.warning("N-PORT fetch failed for %s: %s", ticker, exc)
+        return []
+
+
 # ─── ETF CRI estimation ───────────────────────────────────────────────────────
 
 async def _compute_etf_cri(
@@ -567,10 +830,15 @@ async def _compute_etf_cri(
             raw = await _get(client, f"{FMP_BASE}/etf-holdings",
                              {"symbol": ticker, "apikey": api_key})
         if not (isinstance(raw, list) and raw):
-            # FMP endpoints unavailable on this plan; try Yahoo Finance topHoldings
+            # FMP endpoints unavailable; try Yahoo Finance topHoldings
             yahoo_h = await _yahoo_etf_holdings(ticker, client)
             if yahoo_h:
                 raw = yahoo_h
+        if not (isinstance(raw, list) and raw):
+            # Yahoo also unavailable; use SEC EDGAR N-PORT (free, quarterly filings)
+            nport_h = await _edgar_nport_holdings(ticker, client)
+            if nport_h:
+                raw = nport_h
         if isinstance(raw, list) and raw:
             cache["etf_holdings"][ticker] = {"data": raw, "fetched_at": now}
         else:
