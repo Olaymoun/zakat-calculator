@@ -30,6 +30,22 @@ ETF_HOLDINGS_TTL_DAYS = 7    # ETF holdings rebalance infrequently
 ETF_MISS_TTL_DAYS     = 1    # retry failed ETF holdings lookups after 1 day
 ETF_TOP_N             = 10   # enrich top-N holdings for CRI estimation
 
+# Hardcoded set of common ETF tickers. Used so we only flag real ETFs when
+# FMP's profile endpoint (which carries the authoritative isEtf flag) is not
+# available on the current API plan.
+KNOWN_ETFS = {
+    "SPY", "QQQ", "IWM", "DIA", "VOO", "VTI", "VEA", "VWO", "BND", "AGG",
+    "XLK", "XLF", "XLE", "XLV", "XLI", "XLP", "XLU", "XLY", "XLB", "XLC", "XLRE",
+    "IVV", "VTV", "VUG", "VXUS", "VIG", "VYM", "VGT", "VHT", "VFH", "VIS", "VCR",
+    "SCHD", "SCHX", "SCHB", "SCHG", "SCHV", "SCHA", "SCHF", "SCHE",
+    "ARKK", "ARKQ", "ARKG", "ARKW", "ARKF", "ARKX",
+    "EFA", "EEM", "VNQ", "TLT", "IEF", "SHY", "GLD", "SLV", "USO", "LQD", "HYG",
+    "SMH", "KBE", "KRE", "SOXX", "XBI", "IBB", "GDX", "GDXJ",
+    "TQQQ", "SQQQ", "UPRO", "SPXU", "SSO", "SDS", "UVXY", "VIXY",
+    "FXI", "EWJ", "EWZ", "INDA", "MCHI", "ACWI", "ACWX",
+    "BIL", "SHV", "VCIT", "VCSH", "MUB", "TIP",
+}
+
 # SEC EDGAR: completely free, covers all US-listed companies
 EDGAR_BASE       = "https://data.sec.gov/api/xbrl/companyconcept"
 EDGAR_TICKERS    = "https://www.sec.gov/files/company_tickers.json"
@@ -164,7 +180,9 @@ async def enrich_positions(tickers: list, api_key: str) -> dict:
         # ── ETF CRI estimation for tickers still without balance sheet ─────────
         # ETFs have no meaningful balance sheet of their own.  Instead, fetch the
         # ETF's top holdings, enrich those underlying stocks, and compute a
-        # weighted-average CRI ratio scaled by the ETF price.
+        # weighted-average CRI ratio scaled by the ETF price.  Any BS-less
+        # ticker is tried here; _compute_etf_cri returns None when there are no
+        # holdings (which naturally excludes private companies).
         no_bs_final = [t for t in tickers if not cache["balance_sheets"].get(t, {}).get("data")]
         etf_cri_map: dict = {}
         if no_bs_final:
@@ -183,9 +201,14 @@ async def enrich_positions(tickers: list, api_key: str) -> dict:
         bs  = cache["balance_sheets"][ticker]["data"] if ticker in cache["balance_sheets"] else {}
         r   = _compute_cri(ticker, bs, sf, q)
 
+        # Mark the ticker as an ETF if we are reasonably sure it is one.
+        if ticker.upper() in KNOWN_ETFS:
+            r["is_etf"] = True
+
         if ticker in etf_cri_map:
             r["cri_per_share"]    = round(etf_cri_map[ticker], 6)
             r["is_etf_estimated"] = True
+            r["is_etf"]           = True
 
         results[ticker] = r
 

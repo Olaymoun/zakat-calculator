@@ -10,7 +10,7 @@ A local web app for calculating Zakat on equity portfolios using the **CRI (Cash
 - **CRI method:** calculates Zakat on the liquid portion of each equity holding, not the full market value
 - **ETF CRI estimation:** for ETFs (e.g. XLK, QQQ), CRI is estimated from the weighted average of the top holdings since ETFs have no meaningful balance sheet of their own
 - **Cash and bank accounts:** manually enter bank balances; Zakat (2.5%) is calculated on each and included in the total
-- **Intent toggle:** switch each holding between Long-term (CRI method) and Trading (full market value) intent per Islamic finance guidelines
+- **Intent toggle:** switch each holding between Long-Term (CRI method) and Short-Term (full market value) intent per Islamic finance guidelines
 - **Dual data sources:** FMP for prices and balance sheets; SEC EDGAR as a free fallback for any ticker FMP cannot serve
 - **Smart caching:** balance sheets cached 90 days (quarterly filings), prices cached 1 day, shares float cached 7 days, ETF holdings cached 7 days
 - **Portfolio summary:** total portfolio value, total Zakat due (equities + cash), and per-holding breakdown
@@ -23,8 +23,8 @@ A local web app for calculating Zakat on equity portfolios using the **CRI (Cash
 
 | Intent | Zakatable Base |
 |--------|---------------|
-| **Long-term / Fundamental** | `CRI per share x shares owned` |
-| **Trading / Active** | `Market price x shares owned` |
+| **Long-Term / Fundamental** | `CRI per share x shares owned` |
+| **Short-Term / Active** | `Market price x shares owned` |
 
 ### CRI Formula
 
@@ -116,9 +116,9 @@ In the **Cash and Bank Accounts** section, enter each account name and its curre
 
 ### 5. Set intent per holding
 
-Each equity row has a **Long-term / Trading** toggle:
-- **Long-term:** you hold this stock as a business ownership stake; only the liquid (CRI) fraction is Zakatable
-- **Trading:** you bought this to flip it; the full market value is Zakatable
+Each equity row has a **Long-Term / Short-Term** toggle:
+- **Long-Term:** you hold this stock as a business ownership stake; only the liquid (CRI) fraction is Zakatable
+- **Short-Term:** you bought this to flip it; the full market value is Zakatable
 
 Intent is saved and persists across updates.
 
@@ -189,7 +189,7 @@ The bookmarklet extracts **only ticker symbols and share quantities** from Fidel
 
 ## Limitations
 
-- **Private companies** (e.g. pre-IPO holdings) have no SEC filings or FMP data; CRI will be `$0`. Use Trading intent for these.
+- **Private companies** (e.g. pre-IPO holdings) have no SEC filings or FMP data; CRI will be `$0`. Use Short-Term intent for these.
 - **FMP free tier** supports a limited set of endpoints. Prices come from `/stable/quote` or `/stable/profile`. Balance sheets fall back to SEC EDGAR when FMP returns 402.
 - **Non-US equities** may not have SEC EDGAR filings. CRI will fall back to FMP only.
 - **ETF CRI is an estimate:** only the top 10 holdings by weight are used, extrapolated to the full fund. Accuracy improves for concentrated ETFs and decreases for very broad funds.

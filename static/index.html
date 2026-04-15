@@ -395,33 +395,67 @@ function _buildBookmarklet() {
       'var shares=parseFloat(cell.textContent.trim().replace(/,/g,""));' +
       'if(!isNaN(shares)&&shares>0)sharesByRow[idx]=shares;' +
     '});' +
-    // Capture last price - try common Fidelity column IDs
+    // Capture last price - try many common Fidelity column IDs
     'var priceByRow={};' +
-    '["lastPrice","last","price","mktPrice"].forEach(function(cid){' +
+    '["lastPrice","last","price","mktPrice","latestPrice","Price","quotePrice","unitPrice"].forEach(function(cid){' +
       'document.querySelectorAll("[col-id=\'"+cid+"\']").forEach(function(cell){' +
         'var row=cell.closest(".ag-row");' +
         'var idx=row&&row.getAttribute("row-index");' +
-        'if(!idx||priceByRow[idx])return;' +
-        'var p=parseFloat(cell.textContent.trim().replace(/[$,]/g,""));' +
+        'if(idx==null||priceByRow[idx])return;' +
+        'var p=parseFloat((cell.textContent||"").trim().replace(/[$,]/g,""));' +
         'if(!isNaN(p)&&p>0)priceByRow[idx]=p;' +
       '});' +
     '});' +
-    // Capture account names from ag-grid group header rows
+    // Also capture market value so we can derive price = mktVal/shares as fallback
+    'var mvByRow={};' +
+    // Note: intentionally excluding "val" and "value" as they can collide with cost-basis columns
+    '["mktVal","marketValue","MarketValue","currentValue","totalValue","mkt_val"].forEach(function(cid){' +
+      'document.querySelectorAll("[col-id=\'"+cid+"\']").forEach(function(cell){' +
+        'var row=cell.closest(".ag-row");' +
+        'var idx=row&&row.getAttribute("row-index");' +
+        'if(idx==null||mvByRow[idx])return;' +
+        'var v=parseFloat((cell.textContent||"").trim().replace(/[$,]/g,""));' +
+        'if(!isNaN(v)&&v>0)mvByRow[idx]=v;' +
+      '});' +
+    '});' +
+    // Capture accounts: try dedicated col-ids first
     'var accountByRow={};' +
+    '["account","acctName","acct","accountName","accountNumber","AccountName"].forEach(function(cid){' +
+      'document.querySelectorAll("[col-id=\'"+cid+"\']").forEach(function(cell){' +
+        'var row=cell.closest(".ag-row");' +
+        'var idx=row&&row.getAttribute("row-index");' +
+        'if(idx==null||accountByRow[idx])return;' +
+        'var t=(cell.textContent||"").trim().replace(/\\s+/g," ");' +
+        'if(t)accountByRow[idx]=t;' +
+      '});' +
+    '});' +
+    // Fallback: traverse rows and carry forward the most recent group-header account name
     'var lastAcct="";' +
     'Array.from(document.querySelectorAll(".ag-row")).sort(function(a,b){' +
       'return(parseInt(a.getAttribute("row-index"))||0)-(parseInt(b.getAttribute("row-index"))||0);' +
     '}).forEach(function(row){' +
-      'var gv=row.querySelector(".ag-group-value");' +
-      'if(gv){var txt=gv.textContent.trim().replace(/\\s+/g," ");if(txt)lastAcct=txt;}' +
+      'var gv=row.querySelector(".ag-group-value,[col-id=\'ag-Grid-AutoColumn\'],.ag-row-group-leaf-indent+span");' +
+      'var isGroup=row.classList.contains("ag-row-group")||row.getAttribute("aria-expanded")!=null;' +
+      'if(isGroup&&gv){var gt=(gv.textContent||"").trim().replace(/\\s+/g," ");if(gt&&gt.length>2)lastAcct=gt;}' +
       'var idx=row.getAttribute("row-index");' +
-      'if(idx)accountByRow[idx]=lastAcct;' +
+      'if(idx!=null&&!accountByRow[idx])accountByRow[idx]=lastAcct;' +
     '});' +
-    'var positions=[];' +
+    'var positions=[],pCount=0,aCount=0;' +
     'Object.keys(tickerByRow).forEach(function(idx){' +
-      'if(sharesByRow[idx])positions.push({ticker:tickerByRow[idx],shares:sharesByRow[idx],price:priceByRow[idx]||0,account:accountByRow[idx]||""});' +
+      'if(!sharesByRow[idx])return;' +
+      'var shares=sharesByRow[idx];' +
+      'var price=priceByRow[idx]||0;' +
+      'if(!price&&mvByRow[idx]&&shares>0){price=mvByRow[idx]/shares;}' +
+      'var acct=accountByRow[idx]||"";' +
+      'if(price>0)pCount++;' +
+      'if(acct)aCount++;' +
+      'positions.push({ticker:tickerByRow[idx],shares:shares,price:price,account:acct});' +
     '});' +
+    'try{console.log("[zakat] captured",positions.length,"positions; prices:",pCount,"accounts:",aCount,positions);}catch(_){}' +
     'if(positions.length===0){if(w)w.close();alert("No positions found. Make sure you are on the Fidelity Positions page.");return;}' +
+    'if(pCount<positions.length||aCount<positions.length){' +
+      'try{console.warn("[zakat] partial capture: prices",pCount+"/"+positions.length,"accounts",aCount+"/"+positions.length);}catch(_){}' +
+    '}' +
     'var url="http://localhost:8000/?zakat_import="+encodeURIComponent(JSON.stringify(positions));' +
     'if(w){w.location.href=url;}else{window.open(url,"zakat_calc");}' +
     '}catch(e){alert("Zakat bookmarklet error: "+e);}' +
@@ -573,8 +607,8 @@ function renderPortfolio({ positions, total_zakat, total_market_value, total_cas
     var badges = '';
     if (p.is_etf_estimated) {
       badges += '<span class="badge-etf" title="CRI estimated from ETF holdings">ETF est.</span>';
-    } else if (!p.cri_per_share && !p.error) {
-      badges += '<span class="badge-etf" style="background:#fff7ed;color:#c2410c" title="ETF or no balance sheet data available; switch to Trading intent for full market value">ETF / no CRI</span>';
+    } else if (p.is_etf) {
+      badges += '<span class="badge-etf" style="background:#fff7ed;color:#c2410c" title="ETF: CRI data unavailable on current FMP plan. Switch to Short-Term intent to use full market value.">ETF: use Short-Term</span>';
     }
     if (p.error) badges += '<span class="badge-err" title="' + esc(p.error) + '">No data</span>';
     return '<tr>' +
@@ -584,8 +618,8 @@ function renderPortfolio({ positions, total_zakat, total_market_value, total_cas
       '<td class="num">' + fmt$(p.price||0) + '</td>' +
       '<td class="num">' + fmt$(p.market_value||0) + '</td>' +
       '<td><div class="toggle">' +
-        '<button class="' + (isFund ? 'on-fundamental' : '') + '" onclick="setIntent(\'' + esc(p.ticker) + '\',\'fundamental\')">Long-term</button>' +
-        '<button class="' + (!isFund ? 'on-active' : '') + '" onclick="setIntent(\'' + esc(p.ticker) + '\',\'active\')">Trading</button>' +
+        '<button class="' + (isFund ? 'on-fundamental' : '') + '" onclick="setIntent(\'' + esc(p.ticker) + '\',\'fundamental\')">Long-Term</button>' +
+        '<button class="' + (!isFund ? 'on-active' : '') + '" onclick="setIntent(\'' + esc(p.ticker) + '\',\'active\')">Short-Term</button>' +
       '</div></td>' +
       '<td class="num"><span class="tip" data-tip="' + esc(tip) + '">' + fmt$(p.cri_per_share||0, 4) + '</span></td>' +
       '<td class="num">' + fmt$(p.zakatable_base||0) + '</td>' +
