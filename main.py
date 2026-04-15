@@ -134,9 +134,17 @@ async def receive_positions(positions: list[RawPosition], background_tasks: Back
     if not api_key:
         raise HTTPException(status_code=400, detail="FMP API key not configured.")
 
+    account_name = positions[0].account.strip() if positions else ""
     raw = [{"ticker": p.ticker.upper(), "shares": p.shares,
-            "fidelity_price": p.price,   # stored separately so refresh never confuses it with an old FMP price
-            "account": p.account.strip()} for p in positions]
+            "fidelity_price": p.price,
+            "account": p.account.strip(),
+            "pos_id": str(uuid.uuid4())[:8]} for p in positions]
+
+    # Merge: keep all positions from OTHER accounts, replace this account's positions.
+    if account_name:
+        existing = _load(PORTFOLIO_FILE, [])
+        kept = [p for p in existing if p.get("account", "") != account_name]
+        raw  = kept + raw
     logger.info("Received %d position(s) from bookmarklet: %s",
                 len(raw), [p["ticker"] for p in raw])
 
@@ -211,6 +219,27 @@ async def set_intent(ticker: str, body: IntentBody):
     return {"status": "ok"}
 
 
+# ─── per-position account editing ────────────────────────────────────────────
+
+class AccountUpdate(BaseModel):
+    pos_id:  str
+    account: str
+
+
+@app.patch("/api/positions/account")
+async def set_position_account(body: AccountUpdate):
+    portfolio = _load(PORTFOLIO_FILE, [])
+    matched = False
+    for p in portfolio:
+        if p.get("pos_id") == body.pos_id:
+            p["account"] = body.account.strip()
+            matched = True
+    if not matched:
+        raise HTTPException(status_code=404, detail="Position not found.")
+    _save(PORTFOLIO_FILE, portfolio)
+    return {"status": "ok"}
+
+
 # ─── cash accounts ────────────────────────────────────────────────────────────
 
 class CashEntry(BaseModel):
@@ -270,7 +299,7 @@ async def _enrich_and_save(job_id: str, raw_positions: list, api_key: str):
 
     try:
         # Deduplicate tickers for enrichment (same stock can appear in multiple accounts)
-        unique_tickers = list(dict.fromkeys(p["ticker"] for p in raw_positions))
+        unique_tickers = list(dict.fromkeys(p["ticker"] for p in raw_positions if isinstance(p, dict)))
         log(f"Fetching FMP data for {len(unique_tickers)} unique ticker(s)…")
 
         cri_map = await enrich_positions(unique_tickers, api_key)
@@ -315,4 +344,13 @@ async def _enrich_and_save(job_id: str, raw_positions: list, api_key: str):
 # ─── entrypoint ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8000, reload=False, log_level="warning", access_log=False)
+    config = uvicorn.Config(
+        app,
+        host="127.0.0.1",
+        port=8000,
+        log_level="warning",
+        access_log=False,
+        timeout_graceful_shutdown=3,  # force exit 3 s after Ctrl+C
+    )
+    server = uvicorn.Server(config)
+    server.run()

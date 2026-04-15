@@ -176,6 +176,12 @@ tbody tr:hover td { background: #f9fafb; }
 .ticker      { font-weight: 700; font-size: .95rem; color: var(--navy); }
 .muted-cell  { font-size: .8rem; color: var(--muted); max-width: 160px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .account-section { margin-bottom: 24px; }
+.acct-input {
+  width: 120px; padding: 3px 7px; font-size: .78rem;
+  border: 1.5px solid var(--border); border-radius: 6px;
+  background: #fafafa; color: var(--text); outline: none;
+}
+.acct-input:focus { border-color: var(--blue); background: #fff; }
 .account-heading {
   font-size: .8rem; font-weight: 700; text-transform: uppercase;
   letter-spacing: .5px; color: var(--muted);
@@ -620,8 +626,10 @@ function renderPortfolio({ positions, total_zakat, total_market_value, total_cas
       badges += '<span class="badge-etf" style="background:#fff7ed;color:#c2410c" title="ETF: CRI data unavailable. Switch to Short-Term intent to use full market value.">ETF</span>';
     }
     if (p.error) badges += '<span class="badge-err" title="' + esc(p.error) + '">No data</span>';
+    var posId = esc(p.pos_id || '');
     return '<tr>' +
       '<td><span class="ticker">' + esc(p.ticker) + '</span>' + badges + '</td>' +
+      '<td><input class="acct-input" data-pos-id="' + posId + '" value="' + esc(p.account||'') + '" placeholder="e.g. Individual" onblur="saveAccount(this)" onkeydown="if(event.key===\'Enter\')this.blur()"/></td>' +
       '<td class="num">' + fmtNum(p.shares) + '</td>' +
       '<td class="num">' + fmt$(p.price||0) + '</td>' +
       '<td class="num">' + fmt$(p.market_value||0) + '</td>' +
@@ -639,18 +647,33 @@ function renderPortfolio({ positions, total_zakat, total_market_value, total_cas
     var rows = byAccount[acct];
     var acctZakat = rows.reduce(function(s, p) { return s + (p.zakat_due||0); }, 0);
     var acctValue = rows.reduce(function(s, p) { return s + (p.market_value||0); }, 0);
+    var heading = acct === 'All Holdings'
+      ? '<div class="account-heading">All Holdings <span style="font-weight:400;font-size:.7rem">(re-run the bookmarklet and enter account names to separate)</span></div>'
+      : '<div class="account-heading">' + esc(acct) + '</div>';
     return '<div class="account-section">' +
-      '<div class="account-heading">' + esc(acct) + '</div>' +
+      heading +
       '<div class="account-subline">Market Value: ' + fmt$(acctValue) + ' &nbsp;|&nbsp; Zakat Due: ' + fmt$(acctZakat) + '</div>' +
       '<div class="table-card"><table>' +
       '<thead><tr>' +
-        '<th>Ticker</th><th>Shares</th><th>Market Price</th><th>Market Value</th>' +
+        '<th>Ticker</th><th>Account</th><th>Shares</th><th>Market Price</th><th>Market Value</th>' +
         '<th>Intent</th><th>CRI / Share</th><th>Zakatable Base</th><th>Zakat Due</th>' +
       '</tr></thead>' +
       '<tbody>' + rows.map(rowHtml).join('') + '</tbody>' +
       '</table></div>' +
     '</div>';
   }).join('');
+}
+
+async function saveAccount(input) {
+  var posId   = input.getAttribute('data-pos-id');
+  var account = input.value.trim();
+  if (!posId) return;
+  await fetch('/api/positions/account', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pos_id: posId, account: account }),
+  });
+  loadPortfolio();
 }
 
 async function setIntent(ticker, intent) {
